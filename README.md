@@ -82,8 +82,6 @@ This results in:
 ## 📂 Repository Structure
 
 ```
-/src        → core implementation  
-/data       → datasets / preprocessing  
 /notebooks  → experiments and visualization  
 /report     → project PDF  
 ```
