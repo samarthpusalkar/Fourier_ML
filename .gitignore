@@ -45,9 +45,11 @@ experiments/
 # Generated JSON/PNG outputs
 *_spectral_table.json
 *_analysis.png
-spectral_nd_report.json
-compare_*.png
-compare_*_*.json
+*_report*.json
+*_learnable*.json
+*_slp*.json
+*compare_*.png
+*compare_*_*.json
 
 # Local temp files
 *.tmp
