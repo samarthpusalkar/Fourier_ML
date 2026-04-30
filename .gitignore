@@ -46,6 +46,8 @@ experiments/
 *_spectral_table.json
 *_analysis.png
 spectral_nd_report.json
+compare_*.png
+compare_*_*.json
 
 # Local temp files
 *.tmp
