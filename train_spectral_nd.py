@@ -1,49 +1,53 @@
 """
-Spectral-Locality Network for N-D Tensors
-=========================================
-Extends the SL-Net ideas to tensor inputs (images, patches, tokens)
-without flattening everything to 1D.
+Spectral-Locality Network: True N-Dimensional FFT Processing
+==============================================================
 
-Key architectural decisions:
-  1. PatchEmbed / tokenization preserves spatial structure.
-  2. Each patch is projected to a SHARED low-D latent space (learnable encoder per patch).
-  3. Spectral Token Mixer (STM): replaces Q/K/V attention with a learned
-     frequency-domain filter over the sequence of patch latents.
-  4. Fourier Classification Head: same learnable sinusoidal layer as before,
-     but operates on the globally-pooled spectral representation.
+Corrects the fundamental spatial structure mistake in prior versions.
 
-This is NOT an LLM, but it answers whether spectral methods can replace
-attention for structured data.  The answer: yes, for classification,
-via learned frequency-domain token mixing (similar to FNet but with
-learnable per-frequency gains rather than a plain FFT pass).
+Problem with V1-V6: Patches were flattened to a 1D sequence, and spectral mixing
+was 1D FFT across the flattened patch sequence. This destroys 2D spatial structure.
+
+Solution: Perform N-D FFT over the actual spatial dimensions of the data.
+
+For images (2D spatial data):
+  Input: (B, C, H, W)
+  After patch embedding: (B, latent_dim, H/ph, W/pw)  [keep spatial grid!]
+  Spectral Mixer: 2D FFT over (H/ph, W/pw) spatial dimensions
+  Learnable gains: per frequency bin in the 2D frequency plane
+  This naturally captures horizontal/vertical/diagonal orientations as frequency components.
+
+For tabular (0D):
+  No spatial dimensions, skip mixer, go straight to Fourier head.
+
+For sequences (1D):
+  1D FFT over sequence length.
+
+This is the signal processing approach the user correctly identified.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import json
 import argparse
 import os
 import gzip
 import urllib.request
+import pickle
 
-
-# ---------------------------------------------------------------------------
-# Minimal MNIST loader (same as before)
-# ---------------------------------------------------------------------------
 MNIST_URL = "https://ossci-datasets.s3.amazonaws.com/mnist/"
-MNIST_FILES = {
-    "train_images": "train-images-idx3-ubyte.gz",
-    "train_labels": "train-labels-idx1-ubyte.gz",
-    "test_images":  "t10k-images-idx3-ubyte.gz",
-    "test_labels":  "t10k-labels-idx1-ubyte.gz",
-}
+CIFAR10_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
 
 
 def _download_mnist(data_dir):
+    files = {
+        "train_images": "train-images-idx3-ubyte.gz",
+        "train_labels": "train-labels-idx1-ubyte.gz",
+        "test_images": "t10k-images-idx3-ubyte.gz",
+        "test_labels": "t10k-labels-idx1-ubyte.gz",
+    }
     os.makedirs(data_dir, exist_ok=True)
-    for key, fname in MNIST_FILES.items():
+    for key, fname in files.items():
         fpath = os.path.join(data_dir, fname)
         if not os.path.exists(fpath):
             print(f"Downloading {fname} ...")
@@ -56,247 +60,276 @@ def _load_mnist(data_dir, subset="train"):
     lbl_path = os.path.join(data_dir, f"{prefix}-labels-idx1-ubyte.gz")
     with gzip.open(img_path, "rb") as f:
         images = np.frombuffer(f.read(), np.uint8, offset=16)
-    images = images.reshape(-1, 28 * 28).astype(np.float32) / 255.0
+    images = images.reshape(-1, 28, 28).astype(np.float32) / 255.0
     with gzip.open(lbl_path, "rb") as f:
         labels = np.frombuffer(f.read(), np.uint8, offset=8)
     labels = labels.astype(np.int64)
+    images = np.expand_dims(images, axis=1)
     return torch.from_numpy(images), torch.from_numpy(labels)
 
 
-class SimpleDataset(torch.utils.data.Dataset):
-    def __init__(self, images, labels, reshape=None):
-        self.reshape = reshape
-        self.images = images
-        self.labels = labels
+def _download_cifar10(data_dir):
+    os.makedirs(data_dir, exist_ok=True)
+    fpath = os.path.join(data_dir, "cifar-10-python.tar.gz")
+    if not os.path.exists(fpath):
+        print("Downloading CIFAR-10 ...")
+        urllib.request.urlretrieve(CIFAR10_URL, fpath)
+    extracted = os.path.join(data_dir, "cifar-10-batches-py")
+    if not os.path.exists(extracted):
+        import tarfile
+        with tarfile.open(fpath, "r:gz") as tar:
+            tar.extractall(data_dir)
+    return extracted
 
-    def __len__(self):
-        return len(self.labels)
 
-    def __getitem__(self, idx):
-        x = self.images[idx]
-        if self.reshape is not None:
-            x = x.view(self.reshape)
-        return x, self.labels[idx]
+def _load_cifar10(data_dir):
+    extracted = _download_cifar10(data_dir)
+    base = extracted
+    x_train, y_train = [], []
+    for i in range(1, 6):
+        with open(os.path.join(base, f"data_batch_{i}"), "rb") as f:
+            batch = pickle.load(f, encoding="bytes")
+        x_train.append(batch[b"data"])
+        y_train.extend(batch[b"labels"])
+    x_train = np.concatenate(x_train, axis=0).reshape(-1, 3, 32, 32).astype(np.float32) / 255.0
+    y_train = np.array(y_train, dtype=np.int64)
+    with open(os.path.join(base, "test_batch"), "rb") as f:
+        batch = pickle.load(f, encoding="bytes")
+    x_test = batch[b"data"].reshape(-1, 3, 32, 32).astype(np.float32) / 255.0
+    y_test = np.array(batch[b"labels"], dtype=np.int64)
+    return torch.from_numpy(x_train), torch.from_numpy(y_train), torch.from_numpy(x_test), torch.from_numpy(y_test)
+
+
+def _load_iris():
+    from sklearn.datasets import load_iris
+    from sklearn.model_selection import train_test_split
+    X, y = load_iris(return_X_y=True)
+    X = X.astype(np.float32)
+    x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+    return (torch.from_numpy(x_train), torch.from_numpy(y_train.astype(np.int64)),
+            torch.from_numpy(x_test), torch.from_numpy(y_test.astype(np.int64)))
 
 
 # ---------------------------------------------------------------------------
-# 1 Patch embedding: treats image as a sequence of local patches
-#    MNIST 28x28 -> 7x7 grid of 4x4 patches (49 tokens, 16 dims each)
+# N-Dimensional Spatial Patch Embed
 # ---------------------------------------------------------------------------
-class PatchEmbed1D(nn.Module):
+class NDSpatialPatchEmbed(nn.Module):
     """
-    Converts flat image -> (B, num_patches, patch_dim) by reshaping.
-    No convolutions; purely a view/reshape, so spatial meaning is preserved.
+    Converts input to a spatial grid of patches with learned encoding.
+    Output preserves N-D spatial structure: (B, latent_dim, *spatial_dims).
     """
-    def __init__(self, img_size=(28, 28), patch_size=(4, 4), in_ch=1):
+    def __init__(self, patch_size=(4, 4), in_ch=1, latent_dim=16):
         super().__init__()
-        self.img_size = img_size
         self.patch_size = patch_size
-        self.num_patches = (img_size[0] // patch_size[0]) * (img_size[1] // patch_size[1])
-        self.patch_dim = patch_size[0] * patch_size[1] * in_ch
+        self.in_ch = in_ch
+        self.latent_dim = latent_dim
+        patch_dim = patch_size[0] * patch_size[1] * in_ch
+        self.encoder = nn.Linear(patch_dim, latent_dim)
 
     def forward(self, x):
-        # x: (B, C*H*W) or (B, C, H, W)
-        if x.dim() == 2:
-            B = x.size(0)
-            x = x.view(B, 1, self.img_size[0], self.img_size[1])
+        # x: (B, C, H, W)
         B, C, H, W = x.shape
         ph, pw = self.patch_size
-        # unfold to patches: (B, C, H/ph, ph, W/pw, pw) -> (B, num_patches, patch_dim)
+        # unfold into patches: (B, C, H//ph, W//pw, ph, pw)
         x = x.unfold(2, ph, ph).unfold(3, pw, pw)
         x = x.contiguous().view(B, C, H // ph, W // pw, ph, pw)
+        # permute to (B, H', W', C, ph, pw)
         x = x.permute(0, 2, 3, 1, 4, 5).contiguous()
-        x = x.view(B, -1, C * ph * pw)
+        # flatten patch pixels: (B, H', W', C*ph*pw)
+        x = x.view(B, H // ph, W // pw, -1)
+        # encode each patch to latent_dim: (B, H', W', latent_dim)
+        B_prime, H_prime, W_prime, _ = x.shape
+        x = x.view(B_prime * H_prime * W_prime, -1)
+        x = self.encoder(x)
+        x = x.view(B_prime, H_prime, W_prime, self.latent_dim)
+        # transpose to (B, latent_dim, H', W') for FFT
+        x = x.permute(0, 3, 1, 2).contiguous()
         return x
 
 
 # ---------------------------------------------------------------------------
-# 2 Per-patch latent encoder (shared weights across all patches)
+# N-Dimensional Spectral Mixer
 # ---------------------------------------------------------------------------
-class PatchLatentEncoder(nn.Module):
+class NDSpectralMixer(nn.Module):
     """
-    Shared MLP that compresses each patch independently to a low-D latent.
-    Replaces the global 1D collapse with local, translation-equivariant compression.
-    """
-    def __init__(self, patch_dim, latent_dim=8, hidden_dims=[32]):
-        super().__init__()
-        layers = []
-        prev = patch_dim
-        for h in hidden_dims:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.ReLU())
-            prev = h
-        layers.append(nn.Linear(prev, latent_dim))
-        self.net = nn.Sequential(*layers)
+    Performs N-D FFT over spatial dimensions, applies learnable complex gains,
+    then inverse N-D FFT.  This is the generic spatial feature filtering layer.
 
-    def forward(self, x):
-        # x: (B, num_patches, patch_dim)
-        B, N, D = x.shape
-        x = x.view(B * N, D)
-        z = self.net(x)
-        z = z.view(B, N, -1)
-        return z
-
-
-# ---------------------------------------------------------------------------
-# 3 Spectral Token Mixer (STM)
-#    Replaces Q/K/V self-attention.
-#    Applies FFT across the patch sequence, multiplies by learnable complex mask,
-#    then IFFT back.  This mixes information between patches in the frequency
-#    domain, analogous to FNet but with learned per-frequency gains.
-# ---------------------------------------------------------------------------
-class SpectralTokenMixer(nn.Module):
+    For images: input is (B, latent_dim, H, W) --> 2D FFT over (H, W).
     """
-    Learnable frequency-domain filter over the token (patch) sequence.
-    Forward:
-      1. FFT over sequence dimension (N = num_patches)
-      2. Multiply each frequency bin by a learnable complex gain (A + iB)
-      3. IFFT back to token space
-      4. Residual connection + LayerNorm
-    """
-    def __init__(self, latent_dim, num_patches):
+    def __init__(self, latent_dim, spatial_shape, ndim=2):
         super().__init__()
         self.latent_dim = latent_dim
-        self.num_patches = num_patches
+        self.ndim = ndim
 
-        # Learnable real/imaginary gains for each FFT bin and each latent channel
-        # Shape: (latent_dim, num_patches // 2 + 1) for real and imag parts
-        n_rfft = num_patches // 2 + 1
-        self.gain_real = nn.Parameter(torch.ones(latent_dim, n_rfft) * 0.5)
-        self.gain_imag = nn.Parameter(torch.zeros(latent_dim, n_rfft))
+        # For 2D case: fftfreq returns normalized frequencies, gains per (freq_h, freq_w)
+        if ndim == 2:
+            h, w = spatial_shape
+            self.freq_shape = (h, w // 2 + 1)  # rfft2 output shape
+            self.gain_real = nn.Parameter(torch.ones(latent_dim, *self.freq_shape) * 0.5)
+            self.gain_imag = nn.Parameter(torch.zeros(latent_dim, *self.freq_shape))
+        elif ndim == 1:
+            n = spatial_shape[0]
+            self.freq_shape = (n // 2 + 1,)
+            self.gain_real = nn.Parameter(torch.ones(latent_dim, *self.freq_shape) * 0.5)
+            self.gain_imag = nn.Parameter(torch.zeros(latent_dim, *self.freq_shape))
+
         self.norm = nn.LayerNorm(latent_dim)
 
     def forward(self, z):
-        # z: (B, N, latent_dim)
-        # Transpose to (B, latent_dim, N) for per-channel FFT
-        z_t = z.transpose(1, 2)  # (B, latent_dim, N)
+        # z: (B, latent_dim, *spatial_dims)
+        if self.ndim == 2:
+            # 2D FFT over spatial dims: (B, latent_dim, H, W)
+            z_fft = torch.fft.rfft2(z, dim=(-2, -1))  # (B, latent_dim, H, W//2+1)
+            # Apply learnable complex gains
+            gain = torch.view_as_complex(torch.stack([self.gain_real, self.gain_imag], dim=-1))
+            # gain shape: (latent_dim, H, W//2+1)
+            z_filtered = z_fft * gain.unsqueeze(0)  # broadcast over batch
+            # Inverse 2D FFT - need original spatial shape
+            original_shape = z.shape[-2:]
+            z_out = torch.fft.irfft2(z_filtered, s=original_shape, dim=(-2, -1))
+        elif self.ndim == 1:
+            z_fft = torch.fft.rfft(z, dim=-1)
+            gain = torch.view_as_complex(torch.stack([self.gain_real, self.gain_imag], dim=-1))
+            z_filtered = z_fft * gain.unsqueeze(0)
+            original_len = z.shape[-1]
+            z_out = torch.fft.irfft(z_filtered, n=original_len, dim=-1)
 
-        # RFFT -> complex representation
-        z_fft = torch.fft.rfft(z_t, dim=-1)  # (B, latent_dim, n_rfft)
-
-        # Apply learnable complex gain
-        gain = torch.view_as_complex(
-            torch.stack([self.gain_real, self.gain_imag], dim=-1)
-        )  # (latent_dim, n_rfft)
-        z_filtered = z_fft * gain.unsqueeze(0)  # broadcast over batch
-
-        # IRFFT back
-        z_out = torch.fft.irfft(z_filtered, n=self.num_patches, dim=-1)  # (B, latent_dim, N)
-        z_out = z_out.transpose(1, 2)  # (B, N, latent_dim)
-
-        # Residual + norm
-        return self.norm(z + z_out)
+        # z_out: (B, latent_dim, *spatial_dims)
+        # Residual + LayerNorm (operate on channel dim)
+        z_perm = z_out.permute(0, *list(range(2, 2 + self.ndim)), 1).contiguous()
+        z_orig_perm = z.permute(0, *list(range(2, 2 + self.ndim)), 1).contiguous()
+        # Flatten spatial for LayerNorm
+        old_shape = z_perm.shape
+        z_flat = z_perm.view(-1, self.latent_dim)
+        z_orig_flat = z_orig_perm.view(-1, self.latent_dim)
+        z_normed = self.norm(z_flat + z_orig_flat)
+        z_perm_out = z_normed.view(old_shape)
+        # permute back
+        perm = [0, 1 + self.ndim] + list(range(1, 1 + self.ndim))
+        z_final = z_perm_out.permute(*perm).contiguous()
+        return z_final
 
 
 # ---------------------------------------------------------------------------
-# 4 Fourier Classification Head (on globally pooled latent)
+# Fixed-integer-harmonic Fourier with learnable scale
 # ---------------------------------------------------------------------------
-class FourierHead(nn.Module):
-    """
-    Global average pool over tokens, then learnable sinusoidal classification.
-    Same spirit as the 1D Fourier layer, but now the input is a pooled vector.
-    """
-    def __init__(self, latent_dim, num_modes=64, num_classes=10):
+class GenericFourierHead(nn.Module):
+    def __init__(self, latent_dim, num_modes, init_scale=2.0):
         super().__init__()
+        self.latent_dim = latent_dim
         self.num_modes = num_modes
+        self.proj_weight = nn.Parameter(torch.randn(latent_dim) * 0.1)
+        self.proj_bias = nn.Parameter(torch.zeros(1))
+        self.scale = nn.Parameter(torch.tensor(init_scale, dtype=torch.float32))
+        self.register_buffer('harmonic_n', torch.arange(num_modes + 1, dtype=torch.float32))
+
+    def forward(self, z):
+        # z: (B, latent_dim) -- pooled spatial representation
+        z_1d = torch.matmul(z, self.proj_weight) + self.proj_bias
+        freqs = 2.0 * np.pi * self.harmonic_n / (self.scale.abs() + 1e-6)
+        proj = z_1d.unsqueeze(1) * freqs.unsqueeze(0)
+        cos_terms = torch.cos(proj)
+        sin_terms = torch.sin(proj)
+        fourier_scalar = cos_terms.sum(dim=-1, keepdim=True) + sin_terms.sum(dim=-1, keepdim=True)
+        fourier_scalar = fourier_scalar / (self.num_modes + 1)
+        return fourier_scalar, z
+
+
+# ---------------------------------------------------------------------------
+# Latent Energy Gate
+# ---------------------------------------------------------------------------
+class LatentEnergyGate(nn.Module):
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.gate_logits = nn.Parameter(torch.zeros(latent_dim))
+
+    def forward(self, z):
+        # z: (B, latent_dim, *spatial)
+        gate = torch.sigmoid(self.gate_logits)
+        # unsqueeze gate for spatial dims
+        for _ in range(z.dim() - 2):
+            gate = gate.unsqueeze(-1)
+        return z * gate
+
+
+# ---------------------------------------------------------------------------
+# Unified N-D Spectral Model
+# ---------------------------------------------------------------------------
+class NDSpectralModel(nn.Module):
+    """
+    True N-D spectral model.  Spatial FFT respects actual image dimensions.
+    """
+    def __init__(self, input_type, img_size=None, patch_size=None, in_ch=None,
+                 input_dim=None, latent_dim=16, num_modes=64, num_mixer_layers=2,
+                 num_classes=10, head_hidden=128, init_scale=2.0, ndim=2):
+        super().__init__()
+        self.input_type = input_type
+        self.ndim = ndim
         self.latent_dim = latent_dim
 
-        self.frequencies = nn.Parameter(torch.randn(num_modes, latent_dim) * 0.1)
-        self.A = nn.Parameter(torch.randn(num_modes) * 0.01)
-        self.B = nn.Parameter(torch.randn(num_modes) * 0.01)
-        self.dc = nn.Parameter(torch.zeros(1))
+        if input_type == "image":
+            self.embed = NDSpatialPatchEmbed(patch_size=patch_size, in_ch=in_ch, latent_dim=latent_dim)
+            ph, pw = patch_size
+            spatial_shape = (img_size[0] // ph, img_size[1] // pw)
+            self.mixers = nn.ModuleList([
+                NDSpectralMixer(latent_dim, spatial_shape, ndim=2)
+                for _ in range(num_mixer_layers)
+            ])
+        else:
+            self.encoder = nn.Linear(input_dim, latent_dim)
+            self.embed = None
+            self.mixers = nn.ModuleList([])
 
-        # Classifier on the single scalar output of the Fourier layer
-        # plus optionally the raw pooled latent (for residual capacity)
+        self.gate = LatentEnergyGate(latent_dim)
+        self.fourier_head = GenericFourierHead(latent_dim, num_modes, init_scale)
         self.classifier = nn.Sequential(
-            nn.Linear(1 + latent_dim, 128),
+            nn.Linear(1 + latent_dim, head_hidden),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, num_classes),
+            nn.Linear(head_hidden, num_classes),
         )
 
-    def forward(self, z_pooled):
-        # z_pooled: (B, latent_dim)
-        proj = torch.matmul(z_pooled, self.frequencies.T)  # (B, num_modes)
-        cos_feat = torch.cos(proj)
-        sin_feat = torch.sin(proj)
-        fourier_scalar = self.dc + torch.sum(
-            self.A * cos_feat + self.B * sin_feat, dim=-1, keepdim=True
-        )  # (B, 1)
+    def forward(self, x):
+        if self.input_type == "image":
+            # (B, latent_dim, H', W')
+            z = self.embed(x)
+            z = self.gate(z)
+            for mixer in self.mixers:
+                z = mixer(z)
+                z = self.gate(z)
+            # Global average pool over spatial dimensions
+            z = z.mean(dim=[-2, -1])  # (B, latent_dim)
+        else:
+            z = self.encoder(x)
+            z = self.gate(z.unsqueeze(-1)).squeeze(-1)  # hack for 1D tabular
 
-        features = torch.cat([fourier_scalar, z_pooled], dim=-1)
+        fourier_scalar, z_full = self.fourier_head(z)
+        features = torch.cat([fourier_scalar, z_full], dim=-1)
         logits = self.classifier(features)
         return logits
 
-    def get_spectral_params(self):
+    def get_fourier_info(self):
         return {
-            "frequencies": self.frequencies.detach().cpu().numpy(),
-            "A": self.A.detach().cpu().numpy(),
-            "B": self.B.detach().cpu().numpy(),
-            "dc": self.dc.detach().cpu().item(),
+            "scale": self.fourier_head.scale.item(),
+            "proj_weight_norm": self.fourier_head.proj_weight.norm().item(),
         }
 
 
-# ---------------------------------------------------------------------------
-# Full model assembly
-# ---------------------------------------------------------------------------
-class SpectralNDClassifier(nn.Module):
-    """
-    N-D tensor -> PatchEmbed -> Per-patch latent encoder -> Spectral Token Mixer -> Pool -> Fourier classification head.
-    """
-    def __init__(
-        self,
-        img_size=(28, 28),
-        patch_size=(4, 4),
-        in_ch=1,
-        latent_dim=8,
-        patch_hidden=[32],
-        num_mixer_layers=2,
-        num_modes=64,
-        num_classes=10,
-    ):
+class StandardMLP(nn.Module):
+    def __init__(self, input_dim, hidden, num_classes):
         super().__init__()
-        self.patch_embed = PatchEmbed1D(img_size, patch_size, in_ch)
-        num_patches = self.patch_embed.num_patches
-        patch_dim = self.patch_embed.patch_dim
-
-        self.encoder = PatchLatentEncoder(patch_dim, latent_dim, patch_hidden)
-
-        self.mixers = nn.ModuleList([
-            SpectralTokenMixer(latent_dim, num_patches)
-            for _ in range(num_mixer_layers)
-        ])
-
-        self.head = FourierHead(latent_dim, num_modes, num_classes)
+        layers = []
+        prev = input_dim
+        for h in hidden:
+            layers.extend([nn.Linear(prev, h), nn.ReLU(), nn.Dropout(0.2)])
+            prev = h
+        layers.append(nn.Linear(prev, num_classes))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        # x: (B, C, H, W) or (B, C*H*W)
-        patches = self.patch_embed(x)       # (B, num_patches, patch_dim)
-        z = self.encoder(patches)           # (B, num_patches, latent_dim)
-        for mixer in self.mixers:
-            z = mixer(z)
-        z_pooled = z.mean(dim=1)            # (B, latent_dim)
-        logits = self.head(z_pooled)
-        return logits
-
-    def get_fourier_params(self):
-        return self.head.get_spectral_params()
-
-    def get_token_mixer_gains(self):
-        """Returns the learned real/imaginary gains for each FFT bin."""
-        gains = []
-        for i, mixer in enumerate(self.mixers):
-            gains.append({
-                "layer": i,
-                "gain_real": mixer.gain_real.detach().cpu().numpy().tolist(),
-                "gain_imag": mixer.gain_imag.detach().cpu().numpy().tolist(),
-            })
-        return gains
+        return self.net(x.view(x.size(0), -1))
 
 
-# ---------------------------------------------------------------------------
-# Training helpers (same interface)
-# ---------------------------------------------------------------------------
 def train_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -333,168 +366,99 @@ def count_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ---------------------------------------------------------------------------
-# Baseline standard MLP for comparison
-# ---------------------------------------------------------------------------
-class StandardMLP(nn.Module):
-    def __init__(self, input_dim=784, hidden=[256, 128], num_classes=10):
-        super().__init__()
-        layers = []
-        prev = input_dim
-        for h in hidden:
-            layers.extend([nn.Linear(prev, h), nn.ReLU(), nn.Dropout(0.2)])
-            prev = h
-        layers.append(nn.Linear(prev, num_classes))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x.view(x.size(0), -1))
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Train Spectral N-D Classifier on MNIST")
-    parser.add_argument("--latent_dim", type=int, default=8)
-    parser.add_argument("--patch_size", type=int, nargs=2, default=[4, 4])
-    parser.add_argument("--num_mixer_layers", type=int, default=2)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, required=True, choices=["mnist", "cifar10", "iris"])
+    parser.add_argument("--latent_dim", type=int, default=16)
     parser.add_argument("--num_modes", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--num_mixer_layers", type=int, default=2)
+    parser.add_argument("--patch_size", type=int, nargs=2, default=[4, 4])
+    parser.add_argument("--init_scale", type=float, default=2.0)
+    parser.add_argument("--head_hidden", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-3)
+    parser.add_argument("--run_baseline", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--data_dir", type=str, default="./data/mnist")
-    parser.add_argument("--run_baseline", action="store_true",
-                        help="Also train a standard MLP for parameter comparison")
+    parser.add_argument("--data_dir", type=str, default="./data")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}\n")
+    print(f"Device: {device} | Dataset: {args.dataset}")
+    print(f"Architecture: TRUE N-D spatial FFT (2D FFT over patch grid)\n")
 
-    _download_mnist(args.data_dir)
-    x_train, y_train = _load_mnist(args.data_dir, "train")
-    x_test, y_test = _load_mnist(args.data_dir, "test")
+    if args.dataset == "mnist":
+        _download_mnist(os.path.join(args.data_dir, "mnist"))
+        x_tr, y_tr = _load_mnist(os.path.join(args.data_dir, "mnist"), "train")
+        x_te, y_te = _load_mnist(os.path.join(args.data_dir, "mnist"), "test")
+        input_type = "image"
+        img_size = (28, 28); in_ch = 1; num_classes = 10; ndim = 2
+    elif args.dataset == "cifar10":
+        x_tr, y_tr, x_te, y_te = _load_cifar10(os.path.join(args.data_dir, "cifar10"))
+        input_type = "image"
+        img_size = (32, 32); in_ch = 3; num_classes = 10; ndim = 2
+    elif args.dataset == "iris":
+        x_tr, y_tr, x_te, y_te = _load_iris()
+        input_type = "flat"
+        img_size = None; in_ch = None; num_classes = 3; ndim = 0
 
-    # For N-D model, keep images as (C, H, W)
-    train_ds_nd = SimpleDataset(x_train, y_train, reshape=(1, 28, 28))
-    test_ds_nd = SimpleDataset(x_test, y_test, reshape=(1, 28, 28))
-    train_loader_nd = torch.utils.data.DataLoader(train_ds_nd, batch_size=args.batch_size, shuffle=True)
-    test_loader_nd = torch.utils.data.DataLoader(test_ds_nd, batch_size=args.batch_size, shuffle=False)
+    train_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x_tr, y_tr), batch_size=args.batch_size, shuffle=True
+    )
+    test_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x_te, y_te), batch_size=args.batch_size, shuffle=False
+    )
 
-    # --- Spectral N-D model ---
-    model_nd = SpectralNDClassifier(
-        img_size=(28, 28),
-        patch_size=tuple(args.patch_size),
-        in_ch=1,
-        latent_dim=args.latent_dim,
-        patch_hidden=[32],
-        num_mixer_layers=args.num_mixer_layers,
-        num_modes=args.num_modes,
-        num_classes=10,
+    model = NDSpectralModel(
+        input_type=input_type, img_size=img_size, patch_size=tuple(args.patch_size),
+        in_ch=in_ch, input_dim=x_tr.shape[1] if input_type=="flat" else None,
+        latent_dim=args.latent_dim, num_modes=args.num_modes,
+        num_mixer_layers=args.num_mixer_layers, num_classes=num_classes,
+        head_hidden=args.head_hidden, init_scale=args.init_scale, ndim=ndim,
     ).to(device)
 
-    print("=" * 60)
-    print("Spectral N-D Classifier")
-    print("=" * 60)
-    print(model_nd)
-    print(f"Total parameters: {count_params(model_nd)}")
-    print("-" * 60)
+    print("="*60)
+    print("N-D SPECTRAL MODEL")
+    print("="*60)
+    print(f"Latent dim: {args.latent_dim}")
+    print(f"FFT type: {'2D FFT over patch grid' if input_type == 'image' else 'No FFT'}")
+    print(f"Total parameters: {count_params(model)}")
+    print("-"*60)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model_nd.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     best_acc = 0.0
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train_epoch(model_nd, train_loader_nd, optimizer, criterion, device)
-        test_loss, test_acc = evaluate(model_nd, test_loader_nd, criterion, device)
+        tl, ta = train_epoch(model, train_loader, optimizer, criterion, device)
+        vl, va = evaluate(model, test_loader, criterion, device)
         scheduler.step()
-        if test_acc > best_acc:
-            best_acc = test_acc
-            ckpt = {
-                "state_dict": model_nd.state_dict(),
-                "fourier_params": model_nd.get_fourier_params(),
-                "mixer_gains": model_nd.get_token_mixer_gains(),
-            }
-            torch.save(ckpt, "best_spectral_nd.pt")
-        print(f"Epoch {epoch:02d} | Train Acc: {train_acc:.4f} | Test Acc: {test_acc:.4f}")
-    print(f"Best Spectral N-D accuracy: {best_acc:.4f}\n")
+        if va > best_acc:
+            best_acc = va
+        if epoch <= 3 or epoch % 5 == 0 or epoch == args.epochs:
+            info = model.get_fourier_info()
+            print(f"Epoch {epoch:02d} | Train Acc: {ta:.4f} | Test Acc: {va:.4f} | Scale: {info['scale']:.4f}")
+    print(f"Best N-D Spectral accuracy: {best_acc:.4f}\n")
 
-    # --- Optional baseline comparison ---
     if args.run_baseline:
-        train_ds_flat = SimpleDataset(x_train, y_train)
-        test_ds_flat = SimpleDataset(x_test, y_test)
-        train_loader_flat = torch.utils.data.DataLoader(train_ds_flat, batch_size=args.batch_size, shuffle=True)
-        test_loader_flat = torch.utils.data.DataLoader(test_ds_flat, batch_size=args.batch_size, shuffle=False)
-
-        baseline = StandardMLP(input_dim=784, hidden=[256, 128], num_classes=10).to(device)
-        print("=" * 60)
-        print("Standard MLP Baseline")
-        print("=" * 60)
-        print(baseline)
-        print(f"Total parameters: {count_params(baseline)}")
-        print("-" * 60)
-
-        optimizer_b = torch.optim.Adam(baseline.parameters(), lr=args.lr)
-        scheduler_b = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_b, T_max=args.epochs)
+        baseline = StandardMLP(input_dim=np.prod(x_tr.shape[1:]) if input_type=="image" else x_tr.shape[1],
+                               hidden=[256,128] if input_type=="image" else [64,32], num_classes=num_classes).to(device)
+        print("="*60); print("BASELINE MLP"); print("="*60)
+        print(f"Total parameters: {count_params(baseline)}"); print("-"*60)
+        opt_b = torch.optim.Adam(baseline.parameters(), lr=args.lr)
+        sch_b = torch.optim.lr_scheduler.CosineAnnealingLR(opt_b, T_max=args.epochs)
         best_b = 0.0
         for epoch in range(1, args.epochs + 1):
-            tl, ta = train_epoch(baseline, train_loader_flat, optimizer_b, criterion, device)
-            vl, va = evaluate(baseline, test_loader_flat, criterion, device)
-            scheduler_b.step()
-            if va > best_b:
-                best_b = va
-            print(f"Epoch {epoch:02d} | Train Acc: {ta:.4f} | Test Acc: {va:.4f}")
-        print(f"Best Baseline accuracy: {best_b:.4f}")
-
-    # --- Inspect learned Fourier parameters ---
-    print("\n" + "=" * 60)
-    print("Learned Fourier Head Parameters (by energy)")
-    print("=" * 60)
-    fp = model_nd.get_fourier_params()
-    freqs = fp["frequencies"]   # (num_modes, latent_dim)
-    A = fp["A"]
-    B = fp["B"]
-    energy = np.sqrt(A**2 + B**2)
-    idx = np.argsort(-energy)
-    for rank, i in enumerate(idx[:12], 1):
-        f_norm = np.linalg.norm(freqs[i])
-        print(
-            f"  Rank {rank:2d} | Mode {i:2d} | freq_norm={f_norm:.3f} | "
-            f"energy={energy[i]:.3f} | A={A[i]:7.3f} | B={B[i]:7.3f}"
-        )
-    print(f"  DC offset = {fp['dc']:.4f}")
-
-    # Save human-readable spectral report
-    report = {
-        "model": "SpectralNDClassifier",
-        "config": vars(args),
-        "total_params": count_params(model_nd),
-        "best_accuracy": float(best_acc),
-        "fourier_head": {
-            "dc": float(fp["dc"]),
-            "top_modes": [],
-        },
-        "token_mixer_gains": model_nd.get_token_mixer_gains(),
-    }
-    for rank, i in enumerate(idx[:16], 1):
-        report["fourier_head"]["top_modes"].append({
-            "rank": rank,
-            "mode_index": int(i),
-            "freq_vector": freqs[i].tolist(),
-            "freq_norm": float(np.linalg.norm(freqs[i])),
-            "A": float(A[i]),
-            "B": float(B[i]),
-            "energy": float(energy[i]),
-            "phase_rad": float(np.arctan2(-B[i], A[i])),
-        })
-
-    with open("spectral_nd_report.json", "w") as f:
-        json.dump(report, f, indent=2)
-    print("\nSaved full report to spectral_nd_report.json")
+            tl, ta = train_epoch(baseline, train_loader, opt_b, criterion, device)
+            vl, va = evaluate(baseline, test_loader, criterion, device)
+            sch_b.step()
+            if va > best_b: best_b = va
+            if epoch <= 3 or epoch % 5 == 0 or epoch == args.epochs:
+                print(f"Epoch {epoch:02d} | Train Acc: {ta:.4f} | Test Acc: {va:.4f}")
+        print(f"Best Baseline accuracy: {best_b:.4f}\n")
 
 
 if __name__ == "__main__":
