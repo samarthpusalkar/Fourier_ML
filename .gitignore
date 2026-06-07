@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.env
+.env.*
+venv*/
+ENV/
+.envrc
+
+# Pytest
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files
+data/
+*.csv
+*.h5
+*.npz
+*.npy
+*.jsonl
+*.jsonl.gz
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+*.model
+*.hdf5
+
+# Experiment output
+logs/
+results/
+outputs/
+checkpoints/
+experiments/
+
+# Generated JSON/PNG outputs
+*_spectral_table.json
+*_analysis.png
+*_report*.json
+*_learnable*.json
+*_slp*.json
+*compare_*.png
+*compare_*_*.json
+
+# Local temp files
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VS Code
+.vscode/
+
+# IDEs
+.idea/
+*.iml
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Test / build artifacts
+coverage/
+htmlcov/
+*.cover
+*.coverage
+*.py,cover
+
+# Documentation build
+_build/
+
+temp/
+local/
