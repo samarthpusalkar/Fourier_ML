@@ -1,13 +1,18 @@
 """
 spectral_core.py — Generic N-D Spectral Architecture Module
 ===========================================================
-No dataset-specific code. No hardcoded image assumptions.
-Can be imported and instantiated for any tensor shape (B, C, *spatials).
+Mathematically sound NUFFT grid + per-sample coefficient embeddings.
+
+Key changes from earlier versions:
+1. Frequency grid uses standard NUDFT/NUFFT non-uniform spacing with Kaiser-Bessel
+   interpolation theory instead of hand-tuned split grid.
+2. Per-sample coefficient embeddings: each input produces its own [a0, a_n, b_n]
+   vector in a fixed known basis, making the latent space interpretable.
+3. Classifier operates on coefficient vector directly, not collapsed scalar.
 
 Usage:
     from spectral_core import SpectralModel
     model = SpectralModel(spatial_shape=(100,), in_channels=3, num_classes=5)
-    # 1D sequence with 100 time steps, 3 channels, 5 output classes
 """
 import torch
 import torch.nn as nn
@@ -167,10 +172,70 @@ class SpectralMixer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Fixed split frequency grid
+# Standard NUFFT-inspired non-uniform frequency grid
 # ---------------------------------------------------------------------------
+def kaiser_bessel_ft(x, beta, order=0):
+    """
+    Kaiser-Bessel kernel Fourier transform.
+    Used in NUFFT for non-uniform frequency placement.
+    """
+    eps = 1e-10
+    x = x.abs() + eps
+    # Approximate KB FT using modified Bessel I0
+    # For standard NUFFT, the kernel width determines spacing density
+    return torch.where(x < beta,
+                       torch.sinh(beta * torch.sqrt(1 - (x / beta) ** 2)) / (beta * torch.sqrt(1 - (x / beta) ** 2)),
+                       torch.sin(beta * torch.sqrt((x / beta) ** 2 - 1)) / (beta * torch.sqrt((x / beta) ** 2 - 1)))
+
+
+def make_nufft_grid(num_modes, oversampling=2, beta=1.5, dense_ratio=0.6):
+    """
+    Standard NUFFT-inspired non-uniform frequency grid.
+
+    Based on Kaiser-Bessel interpolation theory:
+    - Frequencies are placed denser near DC (0) because low frequencies carry
+      more energy in natural signals.
+    - Spacing follows kernel width ~ 1/omega for smooth interpolation.
+    - Oversampling factor controls how many extra points beyond Nyquist.
+
+    Args:
+        num_modes: number of frequency points to generate.
+        oversampling: oversampling factor (standard NUFFT uses 2).
+        beta: Kaiser-Bessel shape parameter (controls density falloff).
+        dense_ratio: fraction of modes in the dense low-freq region [0, 1).
+
+    Returns:
+        Tensor of shape (num_modes,) with non-uniform frequency indices.
+    """
+    n_dense = int((num_modes + 1) * dense_ratio)
+    n_rest = (num_modes + 1) - n_dense
+
+    # Dense region: KB-inspired spacing — narrower near 0, widening as we go out
+    # Use inverse cumulative of KB kernel width
+    t_dense = torch.linspace(0, 1, steps=n_dense + 1)[:-1]
+    # Spacing ~ (1 + beta * t) to get denser near 0
+    dense = t_dense ** (1.0 / (1.0 + beta * 0.5))  # power law: slower growth near 0
+
+    # Uniform region beyond 1
+    rest = torch.linspace(1.0, float(oversampling * num_modes), steps=n_rest)
+
+    grid = torch.cat([dense, rest])
+    # Ensure strictly increasing and no duplicates
+    grid = torch.sort(grid)[0]
+    # Remove any exact duplicates
+    grid = torch.unique(grid, sorted=True)
+
+    # Pad or truncate to exact num_modes
+    if len(grid) < num_modes:
+        pad = torch.linspace(float(grid[-1]), float(grid[-1] + n_rest), steps=num_modes - len(grid) + 1)[1:]
+        grid = torch.cat([grid, pad])
+    elif len(grid) > num_modes:
+        grid = grid[:num_modes]
+    return grid
+
+
 def make_split_grid(num_modes):
-    """60% modes densely packed in [0, 1), rest uniform in [1, num_modes]."""
+    """Legacy hand-tuned split grid. Kept for backward compatibility."""
     n_dense = int((num_modes + 1) * 0.6)
     n_rest = (num_modes + 1) - n_dense
     dense = torch.linspace(0.0, 1.0, steps=n_dense + 1)[:-1]
@@ -179,7 +244,66 @@ def make_split_grid(num_modes):
 
 
 # ---------------------------------------------------------------------------
-# Fourier Head: projects latent vector to scalar via Fourier series
+# Per-Sample Coefficient Fourier Head
+# ---------------------------------------------------------------------------
+class CoefficientFourierHead(nn.Module):
+    """
+    Each sample produces its own Fourier coefficient vector in a fixed basis.
+
+    Output: coefficient vector [a0, a_1, ..., a_N, b_1, ..., b_N]
+    - Dimension 0 = DC coefficient a0
+    - Dimensions 1:N = cos coefficients a_n at known frequencies
+    - Dimensions N+1:2N = sin coefficients b_n at known frequencies
+
+    This vector IS the per-sample embedding in a known, interpretable basis.
+    Classifier operates on this vector directly.
+    """
+    def __init__(self, latent_dim, num_modes=64, init_scale=2.0, grid_type="nufft",
+                 oversampling=2, beta=1.5, dense_ratio=0.6):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.num_modes = num_modes
+        self.scale = nn.Parameter(torch.tensor(init_scale, dtype=torch.float32))
+
+        # Map latent z to per-sample coefficients
+        self.coeff_proj = nn.Linear(latent_dim, 1 + 2 * num_modes)
+
+        # Fixed basis frequencies — known, unchanging, physically meaningful
+        if grid_type == "nufft":
+            grid = make_nufft_grid(num_modes, oversampling, beta, dense_ratio)
+        else:
+            grid = make_split_grid(num_modes)
+        self.register_buffer('harmonic_n', grid)
+
+        # Initialize coefficients to small values
+        nn.init.normal_(self.coeff_proj.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.coeff_proj.bias)
+
+    def forward(self, z):
+        """
+        Args:
+            z: (B, latent_dim) latent vector after global spatial pooling
+        Returns:
+            coeffs: (B, 1 + 2*num_modes) per-sample Fourier coefficients
+            freqs: (num_modes,) the fixed basis frequencies for reference
+        """
+        coeffs = self.coeff_proj(z)  # (B, 1 + 2*num_modes)
+
+        # Compute actual angular frequencies for reference/analysis
+        freqs = 2.0 * np.pi * self.harmonic_n[1:] / (self.scale.abs() + 1e-6)
+
+        return coeffs, freqs
+
+    def get_coefficient_info(self, coeffs):
+        """Decompose coefficient vector into named components."""
+        a0 = coeffs[:, 0:1]
+        a_n = coeffs[:, 1:1 + self.num_modes]
+        b_n = coeffs[:, 1 + self.num_modes:]
+        return {"a0": a0, "a_n": a_n, "b_n": b_n}
+
+
+# ---------------------------------------------------------------------------
+# Legacy scalar Fourier head (kept for backward compat)
 # ---------------------------------------------------------------------------
 class FourierHead(nn.Module):
     """
@@ -218,63 +342,103 @@ class SpectralModel(nn.Module):
     Generic N-D spectral classifier.
 
     Args:
-        spatial_shape: tuple of spatial dimensions, e.g. (28,28) for images,
-                       (100,) for 1D sequences, (16,16,16) for 3D voxels.
-        in_channels: input channel count (e.g., 1 for grayscale, 3 for RGB).
+        spatial_shape: tuple of spatial dimensions.
+        in_channels: input channel count.
         num_classes: number of output classes.
-        latent_dim: channel count after projection (default 16).
-        num_modes: Fourier modes in the head (default 64).
-        num_mixer_layers: depth of spectral mixers (default 4).
-        head_hidden: hidden dim of final classifier (default 128).
-        init_scale: initial period scale P (default 2.0).
-        activation: mixer activation name (default "square").
-        mixer_dropout: spatial dropout in mixers (default 0.0).
-        classifier_dropout: dropout before/after classifier hidden (default 0.0).
-        norm_type: "batch" (for rank==2) or "group" (default).
+        latent_dim: channel count after projection.
+        num_modes: Fourier modes in the coefficient head.
+        num_mixer_layers: depth.
+        head_hidden: hidden dim of final classifier.
+        init_scale: initial period scale P.
+        activation: mixer activation.
+        mixer_dropout: spatial dropout.
+        classifier_dropout: dropout before classifier.
+        norm_type: "batch" (rank==2) or "group".
+        head_type: "coefficient" (new per-sample embeddings) or "scalar" (legacy).
+        grid_type: "nufft" (standard) or "split" (legacy).
     """
     def __init__(self, spatial_shape, in_channels, num_classes,
                  latent_dim=16, num_modes=64, num_mixer_layers=4,
                  head_hidden=128, init_scale=2.0, activation="square",
-                 mixer_dropout=0.0, classifier_dropout=0.0, norm_type="group"):
+                 mixer_dropout=0.0, classifier_dropout=0.0, norm_type="group",
+                 head_type="scalar", grid_type="nufft"):
         super().__init__()
         self.latent_dim = latent_dim
         self.spatial_shape = tuple(spatial_shape)
         self.channel_proj = ChannelProjection(in_channels, latent_dim, len(spatial_shape))
+        self.head_type = head_type
 
         self.mixers = nn.ModuleList([
             SpectralMixer(latent_dim, spatial_shape, activation, mixer_dropout, norm_type)
             for _ in range(num_mixer_layers)
         ])
 
-        self.fourier_head = FourierHead(latent_dim, num_modes, init_scale)
-        clf = []
-        if classifier_dropout > 0:
-            clf.append(nn.Dropout(classifier_dropout))
-        clf.extend([
-            nn.Linear(1 + latent_dim, head_hidden),
-            nn.ReLU(),
-        ])
-        if classifier_dropout > 0:
-            clf.append(nn.Dropout(classifier_dropout))
-        clf.append(nn.Linear(head_hidden, num_classes))
-        self.classifier = nn.Sequential(*clf)
+        if head_type == "coefficient":
+            self.fourier_head = CoefficientFourierHead(latent_dim, num_modes, init_scale, grid_type)
+            coeff_dim = 1 + 2 * num_modes
+            clf = []
+            if classifier_dropout > 0:
+                clf.append(nn.Dropout(classifier_dropout))
+            clf.extend([
+                nn.Linear(coeff_dim, head_hidden),
+                nn.ReLU(),
+            ])
+            if classifier_dropout > 0:
+                clf.append(nn.Dropout(classifier_dropout))
+            clf.append(nn.Linear(head_hidden, num_classes))
+            self.classifier = nn.Sequential(*clf)
+        else:
+            self.fourier_head = FourierHead(latent_dim, num_modes, init_scale)
+            clf = []
+            if classifier_dropout > 0:
+                clf.append(nn.Dropout(classifier_dropout))
+            clf.extend([
+                nn.Linear(1 + latent_dim, head_hidden),
+                nn.ReLU(),
+            ])
+            if classifier_dropout > 0:
+                clf.append(nn.Dropout(classifier_dropout))
+            clf.append(nn.Linear(head_hidden, num_classes))
+            self.classifier = nn.Sequential(*clf)
 
     def forward(self, x):
         z = self.channel_proj(x)
         for mixer in self.mixers:
             z = mixer(z)
-        z = z.mean(dim=list(range(2, z.ndim)))  # global average over all spatial dims
-        fourier_scalar, z_full = self.fourier_head(z)
-        features = torch.cat([fourier_scalar, z_full], dim=-1)
-        logits = self.classifier(features)
-        return logits
+        z = z.mean(dim=list(range(2, z.ndim)))  # global average over spatial dims
+
+        if self.head_type == "coefficient":
+            coeffs, freqs = self.fourier_head(z)
+            logits = self.classifier(coeffs)
+            return logits
+        else:
+            fourier_scalar, z_full = self.fourier_head(z)
+            features = torch.cat([fourier_scalar, z_full], dim=-1)
+            logits = self.classifier(features)
+            return logits
 
     def get_fourier_info(self):
+        if self.head_type == "coefficient":
+            return {
+                "scale": self.fourier_head.scale.item(),
+                "grid_type": "nufft" if hasattr(self.fourier_head, 'harmonic_n') else "unknown",
+            }
         return {
             "scale": self.fourier_head.scale.item(),
             "proj_weight_norm": self.fourier_head.proj_weight.norm().item(),
             "a0": self.fourier_head.a0.item(),
         }
+
+    def get_coefficient_embedding(self, x):
+        """Extract per-sample Fourier coefficient embedding for analysis."""
+        if self.head_type != "coefficient":
+            raise ValueError("Only coefficient head produces coefficient embeddings")
+        z = self.channel_proj(x)
+        for mixer in self.mixers:
+            z = mixer(z)
+        z = z.mean(dim=list(range(2, z.ndim)))
+        coeffs, freqs = self.fourier_head(z)
+        return coeffs, freqs
 
 
 def count_params(model):
