@@ -52,6 +52,7 @@ class GenericSpectralMixer1D(nn.Module):
         self.gain_imag = nn.Parameter(torch.zeros(channels, *self.freq_shape))
         self.norm = nn.LayerNorm(channels)
         self.activation = LearnableSquareWave()
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         # x: (B, L, C)
@@ -66,6 +67,7 @@ class GenericSpectralMixer1D(nn.Module):
         x_out = torch.fft.irfft(x_filtered, n=self.spatial_shape[0], dim=1)
         
         x_out = self.activation(x_out)
+        x_out = self.dropout(x_out)
         return self.norm(x_out + x)
 
 
@@ -151,6 +153,7 @@ class LargeSpectralLM(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(coeff_dim, head_hidden),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(head_hidden, vocab_size)
         )
         
@@ -219,7 +222,8 @@ def main():
     print(f"Optimizer: AdamW | LR: {args.lr}")
     print("="*60 + "\n")
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
     
     best_loss = 999.0
@@ -258,7 +262,9 @@ def main():
         avg_loss = total_loss / len(train_loader)
         acc = (total_correct / total_masked) * 100 if total_masked > 0 else 0
         
-        print(f"Epoch {epoch:02d}/{args.epochs:02d} | Train Loss: {avg_loss:.4f} | Train Acc: {acc:.2f}%")
+        scheduler.step()
+        
+        print(f"Epoch {epoch:02d}/{args.epochs:02d} | Train Loss: {avg_loss:.4f} | Train Acc: {acc:.2f}% | LR: {scheduler.get_last_lr()[0]:.6f}")
         
         if epoch % 7 == 0 or epoch == args.epochs:
             model.eval()
