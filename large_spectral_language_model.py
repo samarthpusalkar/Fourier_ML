@@ -191,8 +191,18 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     
     inputs, targets, vocab, word2id, id2word = load_brown_mlm(vocab_size=4000, seq_length=64)
-    loader = torch.utils.data.DataLoader(
-        torch.utils.data.TensorDataset(inputs, targets), batch_size=args.batch_size, shuffle=True
+    
+    # Train/Test Split (90/10)
+    dataset_size = len(inputs)
+    split_idx = int(dataset_size * 0.9)
+    train_inputs, train_targets = inputs[:split_idx], targets[:split_idx]
+    test_inputs, test_targets = inputs[split_idx:], targets[split_idx:]
+    
+    train_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(train_inputs, train_targets), batch_size=args.batch_size, shuffle=True
+    )
+    test_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(test_inputs, test_targets), batch_size=args.batch_size, shuffle=False
     )
     
     model = LargeSpectralLM(
@@ -217,7 +227,7 @@ def main():
         model.train()
         total_loss, total_correct, total_masked = 0.0, 0, 0
         
-        for xb, yb in loader:
+        for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             
             optimizer.zero_grad()
@@ -245,13 +255,38 @@ def main():
                 total_correct += (preds[mask] == yb_flat[mask]).sum().item()
                 total_masked += mask.sum().item()
                 
-        avg_loss = total_loss / len(loader)
+        avg_loss = total_loss / len(train_loader)
         acc = (total_correct / total_masked) * 100 if total_masked > 0 else 0
-        best_loss = min(best_loss, avg_loss)
         
-        print(f"Epoch {epoch:02d}/{args.epochs:02d} | Loss: {avg_loss:.4f} | MLM Acc: {acc:.2f}%")
+        print(f"Epoch {epoch:02d}/{args.epochs:02d} | Train Loss: {avg_loss:.4f} | Train Acc: {acc:.2f}%")
+        
+        if epoch % 7 == 0 or epoch == args.epochs:
+            model.eval()
+            test_loss, test_correct, test_masked = 0.0, 0, 0
+            with torch.no_grad():
+                for xb, yb in test_loader:
+                    xb, yb = xb.to(device), yb.to(device)
+                    logits, coeffs = model(xb)
+                    logits_flat = logits.view(-1, len(vocab))
+                    yb_flat = yb.view(-1)
+                    loss = criterion(logits_flat, yb_flat)
+                    test_loss += loss.item()
+                    mask = yb_flat != -100
+                    if mask.sum() > 0:
+                        preds = logits_flat.argmax(dim=-1)
+                        test_correct += (preds[mask] == yb_flat[mask]).sum().item()
+                        test_masked += mask.sum().item()
+            t_loss = test_loss / len(test_loader)
+            t_acc = (test_correct / test_masked) * 100 if test_masked > 0 else 0
+            print(f"    -> [Test] Loss: {t_loss:.4f} | Acc: {t_acc:.2f}%")
+            
+            if t_loss < best_loss:
+                best_loss = t_loss
+                os.makedirs("results", exist_ok=True)
+                torch.save(model.state_dict(), "results/best_large_spectral.pt")
 
-    print(f"\nFinal Best Loss: {best_loss:.4f}")
+    print(f"\nFinal Best Test Loss: {best_loss:.4f}")
+    print(f"Saved best model to results/best_large_spectral.pt")
     
     # Topology evaluation
     print("\nGenerating topological plot...")
