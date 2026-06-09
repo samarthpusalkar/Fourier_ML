@@ -16,6 +16,7 @@ Usage:
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 
@@ -48,6 +49,32 @@ class ChannelProjection(nn.Module):
         out = torch.einsum(f"{ein_in},{ein_w}->{ein_out}", x, self.weight)
         shape = [1, -1] + [1] * rank
         return out + self.bias.view(*shape)
+
+
+class SpatialAttentionPooling(nn.Module):
+    """
+    Replaces naive Global Average Pooling with a learned attention mechanism.
+    Dynamically weights the importance of each spatial/temporal location before pooling.
+    """
+    def __init__(self, in_channels):
+        super().__init__()
+        # Projects each spatial location's channel vector to an attention logit
+        self.attn_proj = nn.Linear(in_channels, 1)
+
+    def forward(self, x):
+        # x is (B, C, D1, D2, ...)
+        B, C = x.shape[:2]
+        
+        # Flatten all spatial/temporal dimensions into a sequence of length N
+        x_flat = x.view(B, C, -1).transpose(1, 2)  # (B, N, C)
+        
+        # Compute spatial attention weights
+        attn_logits = self.attn_proj(x_flat)       # (B, N, 1)
+        attn_weights = F.softmax(attn_logits, dim=1)
+        
+        # Apply weighted sum across the sequence
+        pooled = torch.bmm(x_flat.transpose(1, 2), attn_weights).squeeze(-1)
+        return pooled
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +399,8 @@ class SpectralModel(nn.Module):
             SpectralMixer(latent_dim, spatial_shape, activation, mixer_dropout, norm_type)
             for _ in range(num_mixer_layers)
         ])
+        
+        self.attention_pool = SpatialAttentionPooling(latent_dim)
 
         if head_type == "coefficient":
             self.fourier_head = CoefficientFourierHead(latent_dim, num_modes, init_scale, grid_type)
@@ -405,7 +434,7 @@ class SpectralModel(nn.Module):
         z = self.channel_proj(x)
         for mixer in self.mixers:
             z = mixer(z)
-        z = z.mean(dim=list(range(2, z.ndim)))  # global average over spatial dims
+        z = self.attention_pool(z)  # Replaces global average pooling over spatial dims
 
         if self.head_type == "coefficient":
             coeffs, freqs = self.fourier_head(z)
