@@ -104,6 +104,9 @@ class CausalContinuousFourierMixer1D(nn.Module):
         # Explicit contiguous() prevents memory stride bugs (tensor_data crash)
         v1_token_mixed = v1_token_mixed.transpose(1, 2).contiguous().view(B, seq_len, C)
         
+        # Scale to prevent activation variance explosion
+        v1_token_mixed = v1_token_mixed / math.sqrt(seq_len)
+        
         # Vector mixing
         v3 = v1_token_mixed * v2
         
@@ -145,6 +148,20 @@ class ContinuousFourierLM(nn.Module):
         # Weight tying for head projection
         self.lm_head = nn.Linear(latent_dim, vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight
+        
+        # Initialize weights to standard Transformer variance
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.zeros_(module.bias)
+            torch.nn.init.ones_(module.weight)
         
     def forward(self, input_ids, labels=None, **kwargs):
         z = self.embedding(input_ids)
