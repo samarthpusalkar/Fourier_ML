@@ -344,6 +344,7 @@ def main():
         report_to="none",
         bf16=use_bf16,
         tf32=torch.cuda.is_available(),  # Enable TF32 for Ampere/Ada Lovelace architecture
+        save_safetensors=False,          # Disable safetensors saving due to weight tying (shared memory)
         dataloader_num_workers=4         
     )
     
