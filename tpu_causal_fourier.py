@@ -296,6 +296,7 @@ def _mp_fn(index, flags):
         
         eval_strategy="steps",
         eval_steps=1000, 
+        eval_accumulation_steps=10,
         logging_steps=100, 
         report_to="none",
         
@@ -340,7 +341,7 @@ if __name__ == "__main__":
     parser.add_argument("--load_weights", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
-    parser.add_argument("--epochs", type=float, default=3.0)
+    parser.add_argument("--epochs", type=float, default=10.0)
     flags, _ = parser.parse_known_args()
     
     # Fix the common Hugging Face network wrapper freeze on managed platforms

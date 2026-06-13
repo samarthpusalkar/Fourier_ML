@@ -255,7 +255,7 @@ def main():
                         help="Per-device training batch size.")
     parser.add_argument("--grad_accum", type=int, default=8,
                         help="Number of gradient accumulation steps.")
-    parser.add_argument("--epochs", type=float, default=2.0,
+    parser.add_argument("--epochs", type=float, default=10.0,
                         help="Number of training epochs.")
     args, _ = parser.parse_known_args()
     
