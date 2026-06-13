@@ -17,6 +17,7 @@ try:
     from google.colab import drive
     print("Detected Google Colab environment. Mounting Google Drive...")
     drive.mount('/content/drive')
+    os.environ["HF_HOME"] = "/content/drive/MyDrive/HF_Cache"
     OUTPUT_PATH = "/content/drive/MyDrive/CausalFourierLM_Checkpoints"
 except ImportError:
     print("Not running in Colab. Using local checkpoint directory.")
@@ -233,13 +234,16 @@ def main():
         output_dir=OUTPUT_PATH,
         num_train_epochs=3,
         # =====================================================================
-        # HBM OOM FIX (XLA Gradient Accumulation Mega-Graph)
-        # Using a native batch size of 8 and grad_accum of 4 keeps the XLA 
-        # graph perfectly sized for 16GB HBM without upcasting or OOMing.
+        # ULTIMATE HBM OOM FIX (XLA Fusion Bloat)
+        # Gradient accumulation > 1 on PyTorch XLA causes the compiler to fuse 
+        # multiple forward/backward steps into a SINGLE execution graph! 
+        # A grad_accum of 4 fused 4 graphs together, demanding 36.95GB HBM!
+        # FIX: We must STRICTLY set gradient_accumulation_steps=1. 
+        # A native batch size of 8 takes exactly ~9.2GB of HBM, fitting perfectly.
         # =====================================================================
         per_device_train_batch_size=8, 
         per_device_eval_batch_size=8,   
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=1,
         optim="adamw_torch",
         learning_rate=2e-04,
         lr_scheduler_type="cosine",      
