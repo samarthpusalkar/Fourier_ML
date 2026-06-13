@@ -67,11 +67,11 @@ class CausalContinuousFourierMixer1D(nn.Module):
         # =====================================================================
         
         # 1. Generate Query Matrices (Q) by rotating the weights through time
-        U_exp = U.unsqueeze(1) # (seq_len, 1, num_modes)
-        V_exp = V.unsqueeze(1)
+        U_exp = U.unsqueeze(1).expand(-1, self.num_heads, -1).contiguous() # (seq_len, num_heads, num_modes)
+        V_exp = V.unsqueeze(1).expand(-1, self.num_heads, -1).contiguous()
         
-        W_cos_exp = W_cos.unsqueeze(0) # (1, num_heads, num_modes)
-        W_sin_exp = W_sin.unsqueeze(0)
+        W_cos_exp = W_cos.unsqueeze(0).expand(seq_len, -1, -1).contiguous() # (seq_len, num_heads, num_modes)
+        W_sin_exp = W_sin.unsqueeze(0).expand(seq_len, -1, -1).contiguous()
         
         P_cos = U_exp * W_cos_exp + V_exp * W_sin_exp # (seq_len, num_heads, num_modes)
         P_sin = V_exp * W_cos_exp - U_exp * W_sin_exp # (seq_len, num_heads, num_modes)
@@ -94,8 +94,8 @@ class CausalContinuousFourierMixer1D(nn.Module):
         # v1: (B, seq_len, num_heads, head_dim) -> (B, num_heads, seq_len, head_dim)
         v1_heads = v1.view(B, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # K_expanded: (1, num_heads, seq_len, seq_len)
-        K_expanded = K_matrix.unsqueeze(0)
+        # K_expanded: (B, num_heads, seq_len, seq_len)
+        K_expanded = K_matrix.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
         
         # MatMul: (1, H, seq_len, seq_len) @ (B, H, seq_len, D) -> (B, H, seq_len, D)
         v1_token_mixed = torch.matmul(K_expanded, v1_heads)
