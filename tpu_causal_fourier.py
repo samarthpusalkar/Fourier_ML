@@ -7,6 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+# Clear Kaggle TPU environment variables that conflict with PyTorch XLA PJRT
+os.environ.pop('TPU_PROCESS_ADDRESSES', None)
+os.environ.pop('CLOUD_TPU_TASK_ID', None)
+
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
 
@@ -254,6 +258,13 @@ def _mp_fn(index, flags):
     train_ds, val_ds, collator, tokenizer = get_datasets(seq_length=flags.seq_len)
     model = ContinuousFourierLM(vocab_size=len(tokenizer), latent_dim=768, num_layers=12, num_modes=128)
     
+    if flags.load_weights and os.path.exists(flags.load_weights):
+        if index == 0:
+            print(f"Loading weights from {flags.load_weights} (fresh epoch / fine-tuning mode)...")
+        # Load state dict map_location="cpu" to be safe with multi-processing/TPUs
+        state_dict = torch.load(flags.load_weights, map_location="cpu")
+        model.load_state_dict(state_dict)
+    
     # HuggingFace Trainer automatically handles moving the model to TPU/XLA devices
     # if the torch_xla module is present in the environment.
     
@@ -324,6 +335,7 @@ def _mp_fn(index, flags):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--load_weights", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
     flags, _ = parser.parse_known_args()
     
@@ -338,9 +350,8 @@ if __name__ == "__main__":
     USE_TPU_CLUSTER = True  
 
     if USE_TPU_CLUSTER:
-        n_cores = 8
-        print(f"Targeting TPU Cluster. Spawning {n_cores} parallel processes...")
-        xmp.spawn(_mp_fn, args=(flags,), nprocs=n_cores, start_method='fork')
+        print("Targeting TPU Cluster. Spawning parallel processes for all available cores...")
+        xmp.spawn(_mp_fn, args=(flags,), nprocs=None, start_method='fork')
     else:
         print("Running in local single-process fallback mode...")
         # Directly invoke your function on the main thread for CPU/single-GPU debugging
