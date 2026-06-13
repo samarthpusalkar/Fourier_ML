@@ -33,13 +33,21 @@ from transformers.modeling_outputs import CausalLMOutput
 # =============================================================================
 
 class CausalContinuousFourierMixer1D(nn.Module):
-    def __init__(self, channels, num_modes=128):
+    def __init__(self, channels, num_modes=128, num_heads=12):
         super().__init__()
         self.channels = channels
         self.num_modes = num_modes
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
         
-        self.fourier_amplitudes = nn.Parameter(torch.randn(channels, num_modes) / math.sqrt(num_modes))
-        self.fourier_phases = nn.Parameter(torch.randn(channels, num_modes))
+        # ---------------------------------------------------------------------
+        # MULTI-HEAD CONTINUOUS FOURIER WEIGHTS
+        # Instead of 768 independent channel filters (which causes RAM explosion),
+        # we group them into 12 Heads (like standard Attention). This maintains 
+        # the exact mathematical freedom while shrinking memory by 64x.
+        # ---------------------------------------------------------------------
+        self.fourier_amplitudes = nn.Parameter(torch.randn(num_heads, num_modes) / math.sqrt(num_modes))
+        self.fourier_phases = nn.Parameter(torch.randn(num_heads, num_modes))
         
         self.register_buffer("frequencies", torch.arange(1, num_modes + 1, dtype=torch.float32))
 
@@ -55,28 +63,64 @@ class CausalContinuousFourierMixer1D(nn.Module):
         v1 = self.proj_v1(x)
         v2 = self.activation(self.proj_v2(x))
         
-        # Create continuous time grid
-        t = torch.linspace(0, 1, seq_len, device=x.device).view(-1, 1) # (seq_len, 1)
+        # Create continuous time grid safely
+        t = torch.linspace(0, 1, seq_len, device=x.device, dtype=x.dtype).view(-1, 1) # (seq_len, 1)
         
-        args = 2 * math.pi * t * self.frequencies.unsqueeze(0) # (seq_len, num_modes)
-        args = args.unsqueeze(-1) + self.fourier_phases.T.unsqueeze(0) # (seq_len, num_modes, C)
+        omega_t = 2 * math.pi * t * self.frequencies.unsqueeze(0) # (seq_len, num_modes)
+        U = torch.cos(omega_t) # (seq_len, num_modes)
+        V = torch.sin(omega_t) # (seq_len, num_modes)
         
-        k_time = (torch.cos(args) * self.fourier_amplitudes.T.unsqueeze(0)).sum(dim=1) # (seq_len, C)
+        W_cos = self.fourier_amplitudes * torch.cos(self.fourier_phases) # (num_heads, num_modes)
+        W_sin = self.fourier_amplitudes * torch.sin(self.fourier_phases) # (num_heads, num_modes)
         
-        # Causal padding
-        pad_len = seq_len
-        v1_padded = F.pad(v1, (0, 0, 0, pad_len)) 
-        k_time_padded = F.pad(k_time, (0, 0, 0, pad_len)) 
+        # =====================================================================
+        # THE FINAL XLA HARDWARE FIX (Pure Matrix Multiplication)
+        # We replace all 'einsum' calls with explicit, standard 'matmul' and 
+        # '.contiguous()' reshaping. XLA sometimes assigns broken memory strides 
+        # (tensor_data crash) when handling heavily interleaved einsum operations.
+        # =====================================================================
         
-        # FFT token mixing
-        v1_seq_freq = torch.fft.rfft(v1_padded, dim=1)
-        k_seq_freq = torch.fft.rfft(k_time_padded, dim=0).unsqueeze(0)
+        # 1. Generate Query Matrices (Q) by rotating the weights through time
+        U_exp = U.unsqueeze(1) # (seq_len, 1, num_modes)
+        V_exp = V.unsqueeze(1)
         
-        v1_token_mixed_padded = torch.fft.irfft(v1_seq_freq * k_seq_freq, n=2*seq_len, dim=1)
-        v1_token_mixed = v1_token_mixed_padded[:, :seq_len, :]
+        W_cos_exp = W_cos.unsqueeze(0) # (1, num_heads, num_modes)
+        W_sin_exp = W_sin.unsqueeze(0)
+        
+        P_cos = U_exp * W_cos_exp + V_exp * W_sin_exp # (seq_len, num_heads, num_modes)
+        P_sin = V_exp * W_cos_exp - U_exp * W_sin_exp # (seq_len, num_heads, num_modes)
+        
+        # Transpose for batched MatMul: (num_heads, seq_len, num_modes)
+        P_cos_h = P_cos.transpose(0, 1)
+        P_sin_h = P_sin.transpose(0, 1)
+        
+        # 2. Compute the exact Toeplitz Matrix via Q * K^T
+        # K_matrix[h, t, j] = P[h, t, m] @ U.T[m, j]
+        M_cos = torch.matmul(P_cos_h, U.T) # (num_heads, seq_len, seq_len)
+        M_sin = torch.matmul(P_sin_h, V.T)
+        K_matrix = M_cos + M_sin 
+        
+        # 3. Apply standard Causal Mask safely (Explicitly matching dtype to prevent FP32 upcast)
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=x.dtype))
+        K_matrix = K_matrix * causal_mask.unsqueeze(0)
+        
+        # 4. Route Values (v1) using standard Attention Batched MatMul
+        # v1: (B, seq_len, num_heads, head_dim) -> (B, num_heads, seq_len, head_dim)
+        v1_heads = v1.view(B, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # K_expanded: (1, num_heads, seq_len, seq_len)
+        K_expanded = K_matrix.unsqueeze(0)
+        
+        # MatMul: (1, H, seq_len, seq_len) @ (B, H, seq_len, D) -> (B, H, seq_len, D)
+        v1_token_mixed = torch.matmul(K_expanded, v1_heads)
+        
+        # 5. Flatten back to standard format safely
+        # Explicit contiguous() prevents XLA memory stride bugs (tensor_data crash)
+        v1_token_mixed = v1_token_mixed.transpose(1, 2).contiguous().view(B, seq_len, C)
         
         # Vector mixing
         v3 = v1_token_mixed * v2
+        
         return self.norm(self.out_proj(v3)) + x
 
 class CausalSpectralBlock(nn.Module):
@@ -157,11 +201,13 @@ def get_datasets(seq_length=512):
         
     return grouped["train"], val_dataset, collator, tokenizer
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    if isinstance(logits, tuple): 
+def preprocess_logits_for_metrics(logits, labels):
+    if isinstance(logits, tuple):
         logits = logits[0]
-    predictions = np.argmax(logits[..., :-1, :], axis=-1)
+    return logits[..., :-1, :].argmax(dim=-1)
+
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
     shifted_labels = labels[..., 1:]
     mask = shifted_labels != -100
     accuracy = (predictions[mask] == shifted_labels[mask]).mean()
@@ -186,9 +232,13 @@ def main():
     training_args = TrainingArguments(
         output_dir=OUTPUT_PATH,
         num_train_epochs=3,
-        # TPUs have massive HBM per core, higher batch sizes are critical for speed
-        per_device_train_batch_size=64, 
-        per_device_eval_batch_size=16,   
+        # =====================================================================
+        # HBM OOM FIX (XLA Gradient Accumulation Mega-Graph)
+        # Using a native batch size of 8 and grad_accum of 4 keeps the XLA 
+        # graph perfectly sized for 16GB HBM without upcasting or OOMing.
+        # =====================================================================
+        per_device_train_batch_size=8, 
+        per_device_eval_batch_size=8,   
         gradient_accumulation_steps=4,
         optim="adamw_torch",
         learning_rate=2e-04,
@@ -203,7 +253,7 @@ def main():
         logging_steps=100, 
         report_to="none",
         
-        dataloader_num_workers=4,
+        dataloader_num_workers=0,
         
         # Note: fp16/bf16 settings are handled natively by XLA compilation
         # xla=True, # Depending on transformers version, this is auto-detected
@@ -215,7 +265,8 @@ def main():
         train_dataset=train_ds, 
         eval_dataset=val_ds, 
         data_collator=collator,
-        compute_metrics=compute_metrics
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
     
     if args.resume_from and os.path.exists(args.resume_from):

@@ -122,11 +122,13 @@ def get_datasets(seq_length=512):
     return grouped["train"], val_dataset, collator, tokenizer
 
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    if isinstance(logits, tuple): 
+def preprocess_logits_for_metrics(logits, labels):
+    if isinstance(logits, tuple):
         logits = logits[0]
-    predictions = np.argmax(logits, axis=-1)
+    return logits.argmax(dim=-1)
+
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
     mask = labels != -100
     return {"accuracy": (predictions[mask] == labels[mask]).mean()}
 
@@ -191,7 +193,8 @@ def main():
         train_dataset=train_ds, 
         eval_dataset=val_ds, 
         data_collator=collator,
-        compute_metrics=compute_metrics
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
     
     if args.resume_from and os.path.exists(args.resume_from):
