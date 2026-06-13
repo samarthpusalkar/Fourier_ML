@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
+
 warnings.filterwarnings("ignore")
 os.environ["WANDB_DISABLED"] = "true"
 
@@ -235,13 +238,20 @@ def compute_metrics(eval_pred):
 # MAIN RUNNER
 # =============================================================================
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--resume_from", type=str, default=None)
-    parser.add_argument("--seq_len", type=int, default=512)
-    args, _ = parser.parse_known_args()
+def _mp_fn(index, flags):
+    # This is safe and accurate because it runs inside the spawned process
+    device = xm.xla_device()
+    try:
+        import torch_xla.runtime as xr
+        world_size = xr.world_size()
+    except (ImportError, AttributeError):
+        try:
+            world_size = xm.xrt_world_size()
+        except Exception:
+            world_size = 1
+    print(f"Process {index} / {world_size} initialized cleanly on device: {device}")
     
-    train_ds, val_ds, collator, tokenizer = get_datasets(seq_length=args.seq_len)
+    train_ds, val_ds, collator, tokenizer = get_datasets(seq_length=flags.seq_len)
     model = ContinuousFourierLM(vocab_size=len(tokenizer), latent_dim=768, num_layers=12, num_modes=128)
     
     # HuggingFace Trainer automatically handles moving the model to TPU/XLA devices
@@ -278,6 +288,9 @@ def main():
         
         dataloader_num_workers=0,
         
+        # Crucial TPU Flags for Multi-Processing
+        ddp_backend="xla",
+        
         # Note: fp16/bf16 settings are handled natively by XLA compilation
         # xla=True, # Depending on transformers version, this is auto-detected
     )
@@ -292,17 +305,43 @@ def main():
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
     
-    if args.resume_from and os.path.exists(args.resume_from):
-        print(f"Resuming training from checkpoint: {args.resume_from}")
-        trainer.train(resume_from_checkpoint=args.resume_from)
+    if flags.resume_from and os.path.exists(flags.resume_from):
+        if index == 0:
+            print(f"Resuming training from checkpoint: {flags.resume_from}")
+        trainer.train(resume_from_checkpoint=flags.resume_from)
     else:
-        print("Starting Colab TPU causal training run...")
+        if index == 0:
+            print("Starting Kaggle TPUv5e-8 multi-core training run...")
         trainer.train()
         
-    final_path = os.path.join(OUTPUT_PATH, "best_model.pt")
-    # Using XLA safe save if needed, but Trainer usually handles standard save
-    torch.save(model.state_dict(), final_path)
-    print(f"Training finalized. Model saved to {final_path}")
+    # Only the master process (Core 0) should save the final state dict to avoid race conditions
+    if index == 0:
+        final_path = os.path.join(OUTPUT_PATH, "best_model.pt")
+        # Using XLA safe save if needed, but Trainer usually handles standard save
+        xm.save(model.state_dict(), final_path)
+        print(f"Training finalized. Model saved to {final_path}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--seq_len", type=int, default=512)
+    flags, _ = parser.parse_known_args()
+    
+    # Fix the common Hugging Face network wrapper freeze on managed platforms
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    
+    # =============================================================================
+    # ENVIRONMENT RUN CONFIGURATION
+    # =============================================================================
+    # Set this to True when committing on Kaggle TPUv5e-8 or Colab TPU v2-8 (8 cores).
+    # Set to False if running on Colab v5e-1 (1 core) or local CPU.
+    USE_TPU_CLUSTER = True  
+
+    if USE_TPU_CLUSTER:
+        n_cores = 8
+        print(f"Targeting TPU Cluster. Spawning {n_cores} parallel processes...")
+        xmp.spawn(_mp_fn, args=(flags,), nprocs=n_cores, start_method='fork')
+    else:
+        print("Running in local single-process fallback mode...")
+        # Directly invoke your function on the main thread for CPU/single-GPU debugging
+        _mp_fn(index=0, flags=flags)
