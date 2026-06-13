@@ -243,6 +243,20 @@ def main():
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--load_weights", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
+    parser.add_argument("--optim", type=str, choices=["adamw_torch", "adafactor"], default="adafactor",
+                        help="Optimizer to use for training (adamw_torch or adafactor)")
+    parser.add_argument("--enable_momentum", action="store_true", default=False,
+                        help="Enable momentum (beta1=0.9) in Adafactor. Slightly increases VRAM.")
+    parser.add_argument("--learning_rate", type=float, default=5e-5,
+                        help="Peak learning rate for the training run.")
+    parser.add_argument("--weight_decay", type=float, default=0.01,
+                        help="Weight decay coefficient.")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Per-device training batch size.")
+    parser.add_argument("--grad_accum", type=int, default=8,
+                        help="Number of gradient accumulation steps.")
+    parser.add_argument("--epochs", type=float, default=2.0,
+                        help="Number of training epochs.")
     args, _ = parser.parse_known_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -260,7 +274,12 @@ def main():
     
     if args.load_weights: 
         print(f"Loading weights from {args.load_weights}")
-        model.load_state_dict(torch.load(args.load_weights, map_location=device))
+        if args.load_weights.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            state_dict = load_file(args.load_weights)
+            model.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(torch.load(args.load_weights, map_location=device))
         
     model.to(device)
     
@@ -269,14 +288,50 @@ def main():
     if use_bf16:
         torch.backends.cuda.matmul.allow_tf32 = True 
     
+    # Configure custom optimizer if Adafactor is chosen
+    optimizers = (None, None)
+    if args.optim == "adafactor":
+        from transformers import Adafactor
+        print("Configuring custom Adafactor optimizer with relative_step=False...")
+        
+        # Exclude bias and norm parameters from weight decay
+        decay_params = []
+        no_decay_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if any(nd in name for nd in ["bias", "LayerNorm", "layernorm", "norm"]):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+                
+        optimizer_grouped_parameters = [
+            {"params": decay_params, "weight_decay": args.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0}
+        ]
+        
+        optimizer = Adafactor(
+            optimizer_grouped_parameters,
+            lr=args.learning_rate,
+            eps=(1e-30, 1e-3),
+            clip_threshold=1.0,
+            decay_rate=-0.8,
+            beta1=0.9 if args.enable_momentum else None,
+            weight_decay=args.weight_decay,
+            scale_parameter=False,
+            relative_step=False,
+            warmup_init=False
+        )
+        optimizers = (optimizer, None)
+    
     training_args = TrainingArguments(
         output_dir=OUTPUT_PATH,
-        num_train_epochs=2,              
-        per_device_train_batch_size=32,  # Batch size adjusted for 768 dim
+        num_train_epochs=args.epochs,              
+        per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=4,   
-        gradient_accumulation_steps=8,
-        optim="adamw_torch",
-        learning_rate=1.5e-04,           # Slightly higher LR for 100M parameter models
+        gradient_accumulation_steps=args.grad_accum,
+        optim=args.optim,
+        learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",      
         warmup_ratio=0.05,
         save_strategy="steps",
@@ -287,7 +342,8 @@ def main():
         eval_accumulation_steps=10,      
         logging_steps=50, 
         report_to="none",
-        bf16=use_bf16,                   
+        bf16=use_bf16,
+        tf32=torch.cuda.is_available(),  # Enable TF32 for Ampere/Ada Lovelace architecture
         dataloader_num_workers=4         
     )
     
@@ -298,7 +354,8 @@ def main():
         eval_dataset=val_ds, 
         data_collator=collator,
         compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        optimizers=optimizers
     )
     
     if args.resume_from and os.path.exists(args.resume_from):
