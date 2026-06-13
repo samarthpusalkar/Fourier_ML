@@ -283,7 +283,7 @@ def _mp_fn(index, flags):
         per_device_eval_batch_size=8,   
         gradient_accumulation_steps=1,
         optim="adamw_torch",
-        learning_rate=2e-04,
+        learning_rate=flags.learning_rate,
         lr_scheduler_type="cosine",      
         warmup_ratio=0.05,
         
@@ -337,6 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--load_weights", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
+    parser.add_argument("--learning_rate", type=float, default=2e-4)
     flags, _ = parser.parse_known_args()
     
     # Fix the common Hugging Face network wrapper freeze on managed platforms
