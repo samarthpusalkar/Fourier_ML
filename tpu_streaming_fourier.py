@@ -57,7 +57,11 @@ class CausalContinuousFourierMixer1D(nn.Module):
         self.fourier_amplitudes = nn.Parameter(torch.randn(num_heads, num_modes) / math.sqrt(num_modes))
         self.fourier_phases = nn.Parameter(torch.randn(num_heads, num_modes))
         
-        self.register_buffer("frequencies", torch.arange(1, num_modes + 1, dtype=torch.float32))
+        # Log-spaced frequencies from 0.01 cycles to 128 cycles (Nyquist limit)
+        # This provides both infinite context scaling (fractional frequencies) 
+        # and sharp local attention (high frequencies) natively!
+        freq_bands = torch.logspace(math.log10(0.01), math.log10(128.0), num_modes)
+        self.register_buffer("frequencies", freq_bands)
 
         self.proj_v1 = nn.Linear(channels, channels)
         self.proj_v2 = nn.Linear(channels, channels)
@@ -72,7 +76,9 @@ class CausalContinuousFourierMixer1D(nn.Module):
         v2 = self.activation(self.proj_v2(x))
         
         # Create continuous time grid safely
-        t = torch.linspace(0, 1, seq_len, device=x.device, dtype=x.dtype).view(-1, 1) # (seq_len, 1)
+        # FIX: We MUST use absolute scaling based on the base training length (512).
+        # During training (seq_len=512), steps are exactly 1/511. 
+        t = (torch.arange(seq_len, device=x.device, dtype=x.dtype) / 511.0).view(-1, 1)
         
         omega_t = 2 * math.pi * t * self.frequencies.unsqueeze(0) # (seq_len, num_modes)
         U = torch.cos(omega_t) # (seq_len, num_modes)
@@ -80,13 +86,6 @@ class CausalContinuousFourierMixer1D(nn.Module):
         
         W_cos = self.fourier_amplitudes * torch.cos(self.fourier_phases) # (num_heads, num_modes)
         W_sin = self.fourier_amplitudes * torch.sin(self.fourier_phases) # (num_heads, num_modes)
-        
-        # =====================================================================
-        # THE FINAL XLA HARDWARE FIX (Pure Matrix Multiplication)
-        # We replace all 'einsum' calls with explicit, standard 'matmul' and 
-        # '.contiguous()' reshaping. XLA sometimes assigns broken memory strides 
-        # (tensor_data crash) when handling heavily interleaved einsum operations.
-        # =====================================================================
         
         # 1. Generate Query Matrices (Q) by rotating the weights through time
         # Explicit .expand() and .contiguous() is crucial for XLA to avoid zero-stride bugs
@@ -104,34 +103,28 @@ class CausalContinuousFourierMixer1D(nn.Module):
         P_sin_h = P_sin.transpose(0, 1)
         
         # 2. Compute the exact Toeplitz Matrix via Q * K^T
-        # K_matrix[h, t, j] = P[h, t, m] @ U.T[m, j]
         M_cos = torch.matmul(P_cos_h, U.T) # (num_heads, seq_len, seq_len)
         M_sin = torch.matmul(P_sin_h, V.T)
         K_matrix = M_cos + M_sin 
         
-        # 3. Apply standard Causal Mask safely (Explicitly matching dtype to prevent FP32 upcast)
+        # 3. Apply standard Causal Mask safely
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=x.dtype))
         K_matrix = K_matrix * causal_mask.unsqueeze(0)
         
         # 4. Route Values (v1) using standard Attention Batched MatMul
-        # v1: (B, seq_len, num_heads, head_dim) -> (B, num_heads, seq_len, head_dim)
         v1_heads = v1.view(B, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # K_expanded: (B, num_heads, seq_len, seq_len)
         # Explicitly expanding the batch dimension for XLA matmul safety
         K_expanded = K_matrix.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
         
-        # MatMul: (1, H, seq_len, seq_len) @ (B, H, seq_len, D) -> (B, H, seq_len, D)
         v1_token_mixed = torch.matmul(K_expanded, v1_heads)
         
         # 5. Flatten back to standard format safely
-        # Explicit contiguous() prevents XLA memory stride bugs (tensor_data crash)
         v1_token_mixed = v1_token_mixed.transpose(1, 2).contiguous().view(B, seq_len, C)
         
         # Scale to prevent activation variance explosion
         v1_token_mixed = v1_token_mixed / math.sqrt(seq_len)
         
-        # Vector mixing
         v3 = v1_token_mixed * v2
         
         return self.norm(self.out_proj(v3)) + x
@@ -166,7 +159,6 @@ class ContinuousFourierLM(nn.Module):
         self.lm_head = nn.Linear(latent_dim, vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight
         
-        # Initialize weights to standard Transformer variance
         self.apply(self._init_weights)
         
     def _init_weights(self, module):
@@ -196,37 +188,47 @@ class ContinuousFourierLM(nn.Module):
         return CausalLMOutput(loss=loss, logits=logits)
 
 # =============================================================================
-# DATA PIPELINE
+# DATA PIPELINE (STREAMING OPENWEBTEXT / FINEWEB-EDU)
 # =============================================================================
 
 def get_datasets(seq_length=512):
-    print("Loading Wikitext-103 dataset from HuggingFace...")
-    ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
+    print("Streaming FineWeb-Edu 10BT dataset from HuggingFace...")
+    # FineWeb-Edu is the highest quality next-token prediction dataset available today.
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
-    tokenized = ds.map(lambda x: tokenizer(x["text"], add_special_tokens=False), batched=True, remove_columns=["text"], num_proc=4)
-    
-    def group_texts(examples):
-        concatenated_examples = {k: list(np.concatenate(examples[k])) for k in examples.keys() if len(examples[k]) > 0}
-        if not concatenated_examples:
-            return {k: [] for k in examples.keys()}
-        total_length = len(concatenated_examples[list(concatenated_examples.keys())[0]])
-        # Extremely important for TPU: guarantee fixed size to avoid XLA recompilation
+    def tokenize_and_group(examples):
+        tokenized = tokenizer(examples["text"], add_special_tokens=False)
+        concatenated_ids = []
+        for ids in tokenized["input_ids"]:
+            concatenated_ids.extend(ids)
+            
+        total_length = len(concatenated_ids)
+        # Drop the remainder that doesn't fit into seq_length cleanly
         total_length = (total_length // seq_length) * seq_length
-        result = {
-            k: [t[i : i + seq_length] for i in range(0, total_length, seq_length)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
+        
+        if total_length == 0:
+            return {"input_ids": [], "labels": []}
+            
+        result_ids = [concatenated_ids[i : i + seq_length] for i in range(0, total_length, seq_length)]
+        
+        return {"input_ids": result_ids, "labels": result_ids.copy()}
 
-    print("Grouping tokens into sequences...")
-    grouped = tokenized.map(group_texts, batched=True, num_proc=4)
+    print("Mapping tokenizer to stream...")
+    # Safe fallback if features are not loaded properly on iterable dataset
+    columns_to_remove = ["text", "id", "dump", "url", "date", "file_path", "language", "language_score", "token_count", "score", "int_score"]
+    
+    streamed_dataset = ds.map(tokenize_and_group, batched=True, remove_columns=columns_to_remove)
     
     collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    val_dataset = grouped["validation"].select(range(1000)) if len(grouped["validation"]) > 1000 else grouped["validation"]
-        
-    return grouped["train"], val_dataset, collator, tokenizer
+    
+    # Take first 1000 items from the stream as a rolling validation set
+    val_dataset = streamed_dataset.take(1000)
+    
+    # Skip the first 1000 to use the rest for training
+    train_dataset = streamed_dataset.skip(1000)
+    
+    return train_dataset, val_dataset, collator, tokenizer
 
 def preprocess_logits_for_metrics(logits, labels):
     if isinstance(logits, tuple):
@@ -245,7 +247,6 @@ def compute_metrics(eval_pred):
 # =============================================================================
 
 def _mp_fn(index, flags):
-    # This is safe and accurate because it runs inside the spawned process
     device = xm.xla_device()
     try:
         import torch_xla.runtime as xr
@@ -262,37 +263,28 @@ def _mp_fn(index, flags):
     
     if flags.load_weights and os.path.exists(flags.load_weights):
         if index == 0:
-            print(f"Loading weights from {flags.load_weights} (fresh epoch / fine-tuning mode)...")
-        # Load state dict map_location="cpu" to be safe with multi-processing/TPUs
+            print(f"Loading weights from {flags.load_weights} (Streaming continuation mode)...")
         state_dict = torch.load(flags.load_weights, map_location="cpu")
         model.load_state_dict(state_dict)
     
-    # HuggingFace Trainer automatically handles moving the model to TPU/XLA devices
-    # if the torch_xla module is present in the environment.
-    
     training_args = TrainingArguments(
         output_dir=OUTPUT_PATH,
-        num_train_epochs=flags.epochs,
-        # =====================================================================
-        # ULTIMATE HBM OOM FIX (XLA Fusion Bloat)
-        # Gradient accumulation > 1 on PyTorch XLA causes the compiler to fuse 
-        # multiple forward/backward steps into a SINGLE execution graph! 
-        # A grad_accum of 4 fused 4 graphs together, demanding 36.95GB HBM!
-        # FIX: We must STRICTLY set gradient_accumulation_steps=1. 
-        # A native batch size of 8 takes exactly ~9.2GB of HBM, fitting perfectly.
-        # =====================================================================
+        # We must use max_steps instead of num_train_epochs because IterableDatasets do not have a fixed length!
+        max_steps=flags.max_steps,
+        
         per_device_train_batch_size=8, 
         per_device_eval_batch_size=8,   
         gradient_accumulation_steps=1,
-        optim="adamw_torch",
+        optim="adafactor",
+        optim_args="relative_step=False,scale_parameter=False,warmup_init=False",
         learning_rate=flags.learning_rate,
         weight_decay=0.01,
         lr_scheduler_type="cosine",      
         warmup_ratio=0.05,
         
-        # Save per epoch to Google Drive, ensuring we don't spam API quotas
+        # Save checkpoints every 2000 steps to Google Drive
         save_strategy="steps",
-        save_steps=1000,   
+        save_steps=2000,   
         save_total_limit=2,              
         
         eval_strategy="steps",
@@ -302,12 +294,7 @@ def _mp_fn(index, flags):
         report_to="none",
         
         dataloader_num_workers=0,
-        
-        # Crucial TPU Flags for Multi-Processing
         ddp_backend="xla",
-        
-        # Note: fp16/bf16 settings are handled natively by XLA compilation
-        # xla=True, # Depending on transformers version, this is auto-detected
     )
     
     trainer = Trainer(
@@ -320,45 +307,30 @@ def _mp_fn(index, flags):
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
     
-    if flags.resume_from and os.path.exists(flags.resume_from):
-        if index == 0:
-            print(f"Resuming training from checkpoint: {flags.resume_from}")
-        trainer.train(resume_from_checkpoint=flags.resume_from)
-    else:
-        if index == 0:
-            print("Starting Kaggle TPUv5e-8 multi-core training run...")
-        trainer.train()
-        
-    # Only the master process (Core 0) should save the final state dict to avoid race conditions
     if index == 0:
-        final_path = os.path.join(OUTPUT_PATH, "best_model.pt")
-        # Using XLA safe save if needed, but Trainer usually handles standard save
+        print("Starting Kaggle TPUv5e-8 Data Streaming run...")
+    trainer.train()
+        
+    if index == 0:
+        final_path = os.path.join(OUTPUT_PATH, "best_model_streaming.pt")
         xm.save(model.state_dict(), final_path)
         print(f"Training finalized. Model saved to {final_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--load_weights", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
-    parser.add_argument("--epochs", type=float, default=10.0)
+    parser.add_argument("--learning_rate", type=float, default=2e-4) # Restored to 2e-4 for a fresh start on the new stream
+    parser.add_argument("--max_steps", type=int, default=50000)
     flags, _ = parser.parse_known_args()
     
-    # Fix the common Hugging Face network wrapper freeze on managed platforms
     os.environ["HF_HUB_DISABLE_XET"] = "1"
     
-    # =============================================================================
-    # ENVIRONMENT RUN CONFIGURATION
-    # =============================================================================
-    # Set this to True when committing on Kaggle TPUv5e-8 or Colab TPU v2-8 (8 cores).
-    # Set to False if running on Colab v5e-1 (1 core) or local CPU.
     USE_TPU_CLUSTER = True  
 
     if USE_TPU_CLUSTER:
-        print("Targeting TPU Cluster. Spawning parallel processes for all available cores...")
+        print("Targeting TPU Cluster. Spawning parallel processes for streaming...")
         xmp.spawn(_mp_fn, args=(flags,), nprocs=None, start_method='fork')
     else:
         print("Running in local single-process fallback mode...")
-        # Directly invoke your function on the main thread for CPU/single-GPU debugging
         _mp_fn(index=0, flags=flags)
