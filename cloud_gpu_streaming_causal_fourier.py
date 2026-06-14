@@ -170,6 +170,15 @@ class ContinuousFourierLM(nn.Module):
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             
         return CausalLMOutput(loss=loss, logits=logits)
+        
+    def state_dict(self, *args, **kwargs):
+        sd = super().state_dict(*args, **kwargs)
+        # Safetensors throws a fatal error if it detects shared memory (tied weights).
+        # We clone the lm_head weight in the state_dict so it saves safely to disk.
+        # When loaded, PyTorch correctly restores it into the tied memory block!
+        if "lm_head.weight" in sd:
+            sd["lm_head.weight"] = sd["lm_head.weight"].clone()
+        return sd
 
 # =============================================================================
 # DATA PIPELINE (STREAMING OPENWEBTEXT / FINEWEB-EDU)
@@ -178,7 +187,8 @@ class ContinuousFourierLM(nn.Module):
 def get_datasets(seq_length=512):
     print("Streaming FineWeb-Edu 10BT dataset from HuggingFace...")
     ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    # Force the tokenizer to ignore document lengths so it stops warning about > 512 chunks
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", model_max_length=int(1e9))
     
     def tokenize_and_group(examples):
         tokenized = tokenizer(examples["text"], add_special_tokens=False)
@@ -258,7 +268,8 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=2e-3)
     parser.add_argument("--max_steps", type=int, default=50000)
     # H100 Optimization Args
-    parser.add_argument("--batch_size", type=int, default=32, help="H100 native batch size per device")
+    # An H100 80GB has massive VRAM. Defaulting to 256 to saturate the Tensor Cores!
+    parser.add_argument("--batch_size", type=int, default=256, help="H100 native batch size per device")
     flags, _ = parser.parse_known_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -317,7 +328,7 @@ def main():
         report_to="none",
         
         # Now fully safe to use due to the InfiniteStreamer sharding fix!
-        dataloader_num_workers=4,
+        dataloader_num_workers=14,
     )
     
     trainer = Trainer(
