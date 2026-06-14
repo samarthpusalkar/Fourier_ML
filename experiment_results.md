@@ -154,3 +154,32 @@ The model demonstrates a massive qualitative improvement in semantic cohesion, f
 > the primary function of a database is to store the primary and secondary keys and to store and retrieve data. as far as storage is concerned, the primary key is the data which can be accessed through relational database management systems. the primary key is used to store data in the form of a record, which can then be accessed by the user. the first form of primary storage is referred to as the primary key, and is used to store the following : - user names and passwords - date, and - user name and password - owner details - other information such as the primary key number and the password and the data type - the length, width, and height of the data. for example, the amount of data in the current year is stored in a file called the “ key ” or
 
 *Note: Notice the remarkable semantic leap! The model accurately associates AI with "human interaction" and "predicting human behavior", databases with "primary and secondary keys", "user names and passwords", and history with the division of the empire under Augustus!*
+
+---
+
+### Qualitative Inference (Checkpoint 60,000)
+**Metrics at Step 60,000 (38k + 22k):**
+* **Validation Loss:** `3.215`
+* **Perplexity (PPL):** `~24.90` ($e^{3.215}$)
+
+The model demonstrates an important shift from "token statistics" to "document statistics." While the explanations may still be factually incorrect, the discourse structure, subject continuity, and causal chaining have significantly improved.
+
+**Prompt 1:** `The history of the Roman Empire is`
+> the history of the roman empire is a tale told in a series of five books. the general prologue is the final part of the book, and the next four chapters have all been written in latin. the length of the book is 12 pages. the author, who is also a philologist, has written an entire book on the book of acts. the books are written in the 7th century bc and the early fourth century bc. the first book in this book is the book of matthew. it contains all the books of the new testament. the king james version of the bible was published in 1570. the book of matthew covers the time of jesus and the revelation of the new testament. the gospel of john is the book of matthew. the book of matthew contains the book of the life
+
+*Note: Fails factually by drifting into biblical history, but succeeds in producing a hallucinated encyclopedia article with coherent sentences, plausible article structure, consistent grammar, and concept chaining.*
+
+**Prompt 2:** `Artificial intelligence and machine learning are`
+> artificial intelligence and machine learning are two of the most promising fields for ai development. in the field of machine learning, ai is used to generate a model of a specific object or process. in fact, the tool can be used to create and test objects. the best way to make an ai - generated model is to build a model that can simulate a real - world situation. the ai model is trained on the data and is useful for creating new and interesting content. it is also used to make predictions or make predictions about the future. ai can help you create a new model by using different models to solve a problem. for example, you can use the model to train a mobile app that has an algorithm to find the best fit for a given dataset. finally, the model
+
+*Note: Demonstrates subject continuity, causal structure, and abstraction. It correctly understands that AI, model, training, prediction, and dataset belong together. The sentence "The best way to make an AI-generated model is to build a model that can simulate a real-world situation." is a strong highlight.*
+
+**Prompt 3:** `The primary function of a database is to`
+> the primary function of a database is to transfer data from one database into another. for example, to transfer data from one database to another, the client performs a request to the database. the database server then sends its data to the database server, which then translates the data into an output format. the format of a database can vary depending on the type of database. functions of database architecture there are several types of databases, each with its own set of features and functions. some of the most common types include : - database - oriented database : this type of database is used to store data in a structured format, such as an excel spreadsheet or a database table. - sql : an sql database is a database management system that manages the structured data of a database. it is a type
+
+*Note: The strongest sample. It successfully weaves "client", "server", "database", "SQL", and "structured data" into a coherent explanation. It shows the model moving from mere repetition of concepts to providing explanations, elaborations, and examples.*
+
+#### Analysis & Next Steps
+- **Qualitative Shift:** The outputs are no longer just predicting local token patterns; they feel like a model attempting to communicate ideas and structures, even when the underlying facts are wrong.
+- **Failure Mode:** The model is now failing due to insufficient world knowledge, weak planning, and limited capacity rather than optimization collapse or inability to learn language. This is a very encouraging sign that the architecture will benefit from scaling.
+- **Next Test Recommendation:** Switch from open-ended completion prompts to short educational Q&A prompts (e.g., `Q: Why is the sky blue?\nA:`). Open-ended generation is currently mixing continuation quality with article-style imitation, whereas Q&A will better isolate the model's factual knowledge.
