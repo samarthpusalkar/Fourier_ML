@@ -25,10 +25,10 @@ try:
     print("Detected Google Colab environment. Mounting Google Drive...")
     drive.mount('/content/drive')
     os.environ["HF_HOME"] = "/content/drive/MyDrive/HF_Cache"
-    OUTPUT_PATH = "/content/drive/MyDrive/CausalFourierLM_Checkpoints"
-except ImportError:
+    OUTPUT_PATH = "/content/drive/MyDrive/CausalFourierLM_Checkpoints_BiggerDataset"
+except:
     print("Not running in Colab. Using local checkpoint directory.")
-    OUTPUT_PATH = "./CausalFourierLM_Checkpoints"
+    OUTPUT_PATH = "./CausalFourierLM_Checkpoints_BiggerDataset"
 
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 
@@ -320,7 +320,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--load_weights", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
-    parser.add_argument("--learning_rate", type=float, default=2e-4) # Restored to 2e-4 for a fresh start on the new stream
+    parser.add_argument("--learning_rate", type=float, default=2e-3)
     parser.add_argument("--max_steps", type=int, default=50000)
     flags, _ = parser.parse_known_args()
     
