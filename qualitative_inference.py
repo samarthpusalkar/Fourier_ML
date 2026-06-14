@@ -209,6 +209,11 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.8, 
     return tokenizer.decode(input_ids[0])
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default="./CausalFourierLM_Checkpoints_BiggerDataset_GPU/best_model_streaming", 
+                        help="Path to a checkpoint folder, pytorch_model.bin, or model.safetensors")
+    args = parser.parse_args()
+
     # 1. Setup
     try:
         import torch_xla.core.xla_model as xm
@@ -229,16 +234,43 @@ if __name__ == "__main__":
     print("Initializing Continuous Fourier Model...")
     model = ContinuousFourierLM(vocab_size=len(tokenizer), latent_dim=768, num_layers=12, num_modes=128)
     
-    # 3. Load Checkpoint (Replace this path with your actual Kaggle checkpoint path!)
-    checkpoint_path = "/Users/samarthpusalkar/Downloads/pytorch_model (1).bin" 
+    # 3. Load Checkpoint
+    checkpoint_path = args.checkpoint
+    loaded = False
     
     if os.path.exists(checkpoint_path):
+        # Resolve directory vs file
+        if os.path.isdir(checkpoint_path):
+            safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
+            bin_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+            if os.path.exists(safetensors_path):
+                checkpoint_path = safetensors_path
+            elif os.path.exists(bin_path):
+                checkpoint_path = bin_path
+
         print(f"Loading weights from {checkpoint_path}...")
-        # PyTorch natively cannot map storage directly to XLA during unpickling. 
-        # We must load into CPU RAM first, then move the model to the device.
-        model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
-    else:
-        print(f"Warning: Could not find {checkpoint_path}. Generating with random weights!")
+        
+        try:
+            if checkpoint_path.endswith(".safetensors"):
+                try:
+                    from safetensors.torch import load_file
+                    state_dict = load_file(checkpoint_path, device="cpu")
+                    model.load_state_dict(state_dict)
+                    loaded = True
+                except ImportError:
+                    print("safetensors package not installed. Please install it or point to a .bin file.")
+            else:
+                state_dict = torch.load(checkpoint_path, map_location="cpu")
+                # Strip potential trainer checkpoint wrapper key if any
+                if "model" in state_dict and not any(k.startswith("embedding") for k in state_dict.keys()):
+                    state_dict = state_dict["model"]
+                model.load_state_dict(state_dict)
+                loaded = True
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            
+    if not loaded:
+        print(f"Warning: Could not load checkpoint from {checkpoint_path}. Generating with random weights!")
         
     model.to(device)
     
@@ -250,5 +282,6 @@ if __name__ == "__main__":
     ]
     
     for prompt in test_prompts:
-        result = generate_text(model, tokenizer, prompt, max_new_tokens=600, temperature=0.7)
+        result = generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7)
         print(f"[Output]: {result}\n")
+
