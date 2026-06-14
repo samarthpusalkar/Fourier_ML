@@ -217,3 +217,33 @@ The 110M scale optimization is largely complete. The next valuable experiments w
 1. **110M Transformer Baseline:** For rigorous comparison.
 2. **500M Version:** To see how scaling resolves the planning and repetition issues.
 3. **Long-Context Experiment:** To stress-test and reveal the advantages of the subquadratic mechanism.
+
+---
+
+### Context Scaling & Q&A Inference Observations (Checkpoint 96,000)
+
+Following the recommendation to test Q&A formatting and evaluate the subquadratic attention mechanism's long-context capabilities, two new tests were conducted.
+
+#### 1. Q&A Prompt Inference
+The model's responses to direct questions demonstrate its current capability profile:
+
+* **Prompt:** `Q: Why is the sky blue?\nA:`
+  **Observation:** The model retrieves topically relevant vocabulary (`temperature`, `atmosphere`, `water droplets`, `hydroxyl radicals`) and applies a logical explanatory structure. However, the explanation is factually incorrect and hallucinates physical mechanisms.
+* **Prompt:** `Q: What is the capital of France?\nA:`
+  **Observation:** The generation enters a repetition loop ("the capital of france is the capital of france") before pivoting to generating language-learning examples and grammatical definitions (e.g., nouns, adjectives).
+* **Prompt:** `Q: How does a database store information?\nA:`
+  **Observation:** The model correctly associates relational databases with tables, columns, data types, and unique identifiers. It demonstrates recursive, repetitive logic in its explanation (e.g., "in a table, the table is called the table table").
+
+#### 2. Context Continuation Scaling Test
+To test the effective context window, the model was prompted to continue a natural text document at various input lengths.
+
+| Context Length | Generation Quality Observation |
+| :--- | :--- |
+| **200 Tokens** | Highly coherent and grammatically correct continuation. The model seamlessly extends the semantic context regarding data storage and applications. |
+| **600 Tokens** | Coherence degrades. The model begins repeating structural words ("the, and thecontre") and phrases ("data of data database"), losing long-range narrative tracking. |
+| **1000 Tokens** | Severe syntax breakdown. Sentence structures dissolve, and punctuation becomes erratic (", with a and an edm..."). |
+| **1500 Tokens** | Near-total structural collapse. The output consists of disjointed words and extreme punctuation repetition ("stm pc ' s and database. the....."). |
+| **2000 Tokens** | Complete context collapse. The output degrades into a sequence of repetitive function words and punctuation ("the the all the every, number..."). |
+
+**Conclusion from Observations:**
+The model (at 110M parameters, 96,000 steps) exhibits strong local coherence, concept association, and syntactic structure within short contexts (up to ~200 tokens). However, as the input context scales beyond 600 tokens, the generation quality degrades systematically, leading to complete structural and grammatical collapse by 1500 tokens. This highlights a clear limitation in the current architecture's long-context discourse planning and attention span.
