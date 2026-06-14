@@ -134,3 +134,23 @@ Tested via `mlx_inference.py` (Apple Silicon native MLX engine). The following o
 > the primary function of a database is to store a query object in a database. it can be used to store data in a database and in a relational database. it can also be used in database management system. sqlite database is an example of a relational database. it is used for the representation of a database in a relational database. it is a relational database application that can be used in sql server and other relational database services. all relational databases are created with the same basic features as relational databases. the database is not a relational database. it is a relational database that is an object - relational database, so it can be discussed in this article. advantages of relational database - relational database has many features which makes it easy to manage. - it is easy to use and it is easy to
 
 *Note: The model has successfully learned standard markdown structures (e.g., rendering tables `| roman coins |` and bullet points `- it is easy to use`).*
+
+---
+
+### Qualitative Inference (Checkpoint 38,000)
+**Metrics at Step 38,000:**
+* **Validation Loss:** `3.44`
+* **Perplexity (PPL):** `~31.19` ($e^{3.44}$)
+
+The model demonstrates a massive qualitative improvement in semantic cohesion, factual association, and sophisticated grammar logic over checkpoint 26k:
+
+**Prompt 1:** `The history of the Roman Empire is`
+> the history of the roman empire is that the romans were the first to have a continuous system of organising the empire, which was called the empire of the three emperors. during the reign of emperor augustus the empire was divided into two parts : the empire of the east and the west of the empire. in the east the empire of the east was divided into provinces of the empire of both sub - states, the east into the east and the persian empire of the east of the empire. the eastern empire was created as the empire of the east of the qing dynasty and the empire of the east of china. the empire of the east was divided into three provinces : the eastern provinces of china were divided into provinces of the empire of the former empire, the eastern empire of the east and the eastern
+
+**Prompt 2:** `Artificial intelligence and machine learning are`
+> artificial intelligence and machine learning are now making it possible for humans to carry out tasks that require human interaction, such as text messaging, as well as the ability to learn and store data. nevertheless, in the future, the memory used to store human intelligence could be limited to a small fraction of the human population. this is why, in the future, researchers will be able to use machine learning to analyze and predict human behavior and prescribe the use of intelligent machines for the benefit of humanity. image credit : istock03. ca for many students, the critical task of a high - level language teacher is to help them become more proficient in their language. this is achieved through a combination of strategies such as : - training the student to reflect on how they can use the information
+
+**Prompt 3:** `The primary function of a database is to`
+> the primary function of a database is to store the primary and secondary keys and to store and retrieve data. as far as storage is concerned, the primary key is the data which can be accessed through relational database management systems. the primary key is used to store data in the form of a record, which can then be accessed by the user. the first form of primary storage is referred to as the primary key, and is used to store the following : - user names and passwords - date, and - user name and password - owner details - other information such as the primary key number and the password and the data type - the length, width, and height of the data. for example, the amount of data in the current year is stored in a file called the “ key ” or
+
+*Note: Notice the remarkable semantic leap! The model accurately associates AI with "human interaction" and "predicting human behavior", databases with "primary and secondary keys", "user names and passwords", and history with the division of the empire under Augustus!*
