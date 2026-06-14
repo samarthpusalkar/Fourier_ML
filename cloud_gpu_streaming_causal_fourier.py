@@ -268,8 +268,8 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=2e-3)
     parser.add_argument("--max_steps", type=int, default=50000)
     # H100 Optimization Args
-    # An H100 80GB has massive VRAM. Defaulting to 256 to saturate the Tensor Cores!
-    parser.add_argument("--batch_size", type=int, default=256, help="H100 native batch size per device")
+    # An H100 80GB has massive VRAM. Defaulting to 128 to saturate the Tensor Cores!
+    parser.add_argument("--batch_size", type=int, default=128, help="H100 native batch size per device")
     flags, _ = parser.parse_known_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
