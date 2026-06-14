@@ -285,7 +285,11 @@ def main():
     
     if flags.load_weights and os.path.exists(flags.load_weights):
         print(f"Loading weights from {flags.load_weights} (Streaming continuation mode)...")
-        state_dict = torch.load(flags.load_weights, map_location=device)
+        if flags.load_weights.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            state_dict = load_file(flags.load_weights, device=device)
+        else:
+            state_dict = torch.load(flags.load_weights, map_location=device, weights_only=False)
         model.load_state_dict(state_dict)
         
     model.to(device)
