@@ -332,7 +332,9 @@ def main():
         report_to="none",
         
         # Now fully safe to use due to the InfiniteStreamer sharding fix!
-        dataloader_num_workers=14,
+        dataloader_num_workers=6, # not max to avoid request block
+        dataloader_prefetch_factor=6, # shoould help avoind gpu to have free time
+        dataloader_pin_memory=True # should help in memory bandwith transfer
     )
     
     trainer = Trainer(
