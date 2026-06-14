@@ -104,6 +104,6 @@ To understand the optimal learning rate dynamics, we compare the metrics at **St
    * Since the training code includes saving to Google Drive every 2,000 steps (`OUTPUT_PATH = "/content/drive/MyDrive/CausalFourierLM_Checkpoints_BiggerDataset"`), a checkpoint at step 2,000 was successfully saved.
    * **To resume the run**, execute `tpu_streaming_fourier.py` with the command-line flag:
      ```bash
-     python tpu_streaming_fourier.py --load_weights "/content/drive/MyDrive/CausalFourierLM_Checkpoints_BiggerDataset/checkpoint-2000/pytorch_model.bin" --learning_rate 2e-3
+     python tpu_streaming_fourier.py --resume_from_checkpoint "/content/drive/MyDrive/CausalFourierLM_Checkpoints_BiggerDataset/checkpoint-2000"
      ```
      *(Adjust the path if the Trainer saved it as a safetensors file or a different naming convention).*

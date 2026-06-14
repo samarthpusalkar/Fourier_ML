@@ -32,7 +32,10 @@ class CausalContinuousFourierMixer1D(nn.Module):
         self.fourier_amplitudes = nn.Parameter(torch.randn(num_heads, num_modes) / math.sqrt(num_modes))
         self.fourier_phases = nn.Parameter(torch.randn(num_heads, num_modes))
         
-        self.register_buffer("frequencies", torch.arange(1, num_modes + 1, dtype=torch.float32))
+        # Log-spaced frequencies from 0.01 cycles to 128 cycles (Nyquist limit)
+        # This matches the RoPE-style fractional frequency architecture of the training script
+        freq_bands = torch.logspace(math.log10(0.01), math.log10(128.0), num_modes)
+        self.register_buffer("frequencies", freq_bands)
 
         self.proj_v1 = nn.Linear(channels, channels)
         self.proj_v2 = nn.Linear(channels, channels)
@@ -173,48 +176,6 @@ class ContinuousFourierLM(nn.Module):
             
         return CausalLMOutput(loss=loss, logits=logits)
 
-class ContinuousFourierLM(nn.Module):
-    def __init__(self, vocab_size, latent_dim=768, num_layers=12, num_modes=128):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, latent_dim, padding_idx=0)
-        
-        self.mixers = nn.ModuleList([
-            CausalSpectralBlock(latent_dim, num_modes) 
-            for _ in range(num_layers)
-        ])
-        self.ln_f = nn.LayerNorm(latent_dim)
-        
-        self.lm_head = nn.Linear(latent_dim, vocab_size, bias=False)
-        self.lm_head.weight = self.embedding.weight
-        
-        # Initialize weights to standard Transformer variance
-        self.apply(self._init_weights)
-        
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, nn.LayerNorm):
-            torch.nn.init.zeros_(module.bias)
-            torch.nn.init.ones_(module.weight)
-        
-    def forward(self, input_ids, labels=None, **kwargs):
-        z = self.embedding(input_ids)
-        for mixer in self.mixers: 
-            z = mixer(z)
-        logits = self.lm_head(self.ln_f(z))
-        
-        loss = None
-        if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            
-        return CausalLMOutput(loss=loss, logits=logits)
 
 def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.8, top_k=50):
     model.eval()
@@ -249,8 +210,19 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.8, 
 
 if __name__ == "__main__":
     # 1. Setup
-    device = "cuda" if torch.cuda.is_available() else "mps"
-    print(f"Using device: {device}")
+    try:
+        import torch_xla.core.xla_model as xm
+        device = xm.xla_device()
+        print(f"Using TPU device: {device}")
+        print("Note: TPU generation (XLA) may take extra time on the first few tokens due to graph compilation.")
+    except ImportError:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+        print(f"Using fallback device: {device}")
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     # 2. Initialize Model
@@ -262,7 +234,9 @@ if __name__ == "__main__":
     
     if os.path.exists(checkpoint_path):
         print(f"Loading weights from {checkpoint_path}...")
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        # PyTorch natively cannot map storage directly to XLA during unpickling. 
+        # We must load into CPU RAM first, then move the model to the device.
+        model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
     else:
         print(f"Warning: Could not find {checkpoint_path}. Generating with random weights!")
         

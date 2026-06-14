@@ -2,6 +2,7 @@ import os
 import math
 import argparse
 import warnings
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -226,7 +227,33 @@ def get_datasets(seq_length=512):
     val_dataset = streamed_dataset.take(1000)
     
     # Skip the first 1000 to use the rest for training
-    train_dataset = streamed_dataset.skip(1000)
+    hf_train_dataset = streamed_dataset.skip(1000)
+    
+    # Wrap the dataset in an infinite generator to prevent Trainer from triggering
+    # epoch-boundary shuffles (which crash due to .skip()/.take()) and to 
+    # seamlessly recover from Hugging Face network stream timeouts.
+    class InfiniteStreamer(torch.utils.data.IterableDataset):
+        def __init__(self, dataset):
+            self.dataset = dataset
+        def __iter__(self):
+            while True:
+                items_yielded = 0
+                try:
+                    # Attempt to iterate through the dataset
+                    for item in self.dataset:
+                        yield item
+                        items_yielded += 1
+                except Exception as e:
+                    # If the network drops mid-stream, catch the exception!
+                    # We log it, and the `while True` loop will naturally restart the stream.
+                    logging.warning(f"Stream interrupted due to error: {e}. Restarting stream...")
+                
+                # Safety net: prevent an infinite CPU hang if the network is permanently dead
+                if items_yielded == 0:
+                    print("Hugging Face stream returned 0 items (network dead). Stopping to prevent infinite hang.")
+                    break
+
+    train_dataset = InfiniteStreamer(hf_train_dataset)
     
     return train_dataset, val_dataset, collator, tokenizer
 
@@ -282,10 +309,16 @@ def _mp_fn(index, flags):
         lr_scheduler_type="cosine",      
         warmup_ratio=0.05,
         
-        # Save checkpoints every 2000 steps to Google Drive
+        # Save checkpoints every 2000 steps to Google Drive (or Kaggle local disk)
         save_strategy="steps",
         save_steps=2000,   
-        save_total_limit=2,              
+        save_total_limit=2,
+        
+        # Cloud Checkpoint Backup
+        push_to_hub=True,
+        hub_strategy="checkpoint",         # CRITICAL: Uploads the actual crash-recovery checkpoint folders
+        hub_private_repo=True,
+        hub_model_id="your-username/my-crash-backups",              
         
         eval_strategy="steps",
         eval_steps=1000, 
@@ -309,7 +342,7 @@ def _mp_fn(index, flags):
     
     if index == 0:
         print("Starting Kaggle TPUv5e-8 Data Streaming run...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=flags.resume_from_checkpoint)
         
     if index == 0:
         final_path = os.path.join(OUTPUT_PATH, "best_model_streaming.pt")
@@ -319,6 +352,7 @@ def _mp_fn(index, flags):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--load_weights", type=str, default=None)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     parser.add_argument("--seq_len", type=int, default=512)
     parser.add_argument("--learning_rate", type=float, default=2e-3)
     parser.add_argument("--max_steps", type=int, default=50000)
