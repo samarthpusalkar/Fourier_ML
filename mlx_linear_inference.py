@@ -31,7 +31,7 @@ class CausalContinuousFourierMixer1D(nn.Module):
         self.out_proj = nn.Linear(channels, channels)
         self.norm = nn.LayerNorm(channels)
 
-    def __call__(self, x):
+    def __call__(self, x, state=None):
         B, seq_len, C = x.shape
         
         v1 = self.proj_v1(x)
@@ -39,7 +39,8 @@ class CausalContinuousFourierMixer1D(nn.Module):
         v2 = nn.silu(self.proj_v2(x))
         
         # Create continuous time grid
-        t = mx.arange(seq_len, dtype=x.dtype) / 511.0
+        current_step = 0 if state is None else state[2]
+        t = mx.arange(current_step, current_step + seq_len, dtype=x.dtype) / 511.0
         t = mx.expand_dims(t, 1) # (seq_len, 1)
         
         omega_t = 2 * math.pi * t * mx.expand_dims(self.frequencies, 0) # (seq_len, num_modes)
@@ -84,6 +85,14 @@ class CausalContinuousFourierMixer1D(nn.Module):
         S_cos = mx.cumsum(U_outer_V, axis=1) 
         S_sin = mx.cumsum(V_outer_V, axis=1)
         
+        # Add previous state if caching!
+        if state is not None:
+            prev_S_cos, prev_S_sin, _ = state
+            S_cos = S_cos + mx.expand_dims(prev_S_cos, 1)
+            S_sin = S_sin + mx.expand_dims(prev_S_sin, 1)
+            
+        new_state = (S_cos[:, -1, ...], S_sin[:, -1, ...], current_step + seq_len)
+        
         # Reshape P to (1, seq_len, num_heads, num_modes, 1)
         P_cos_state = mx.expand_dims(mx.expand_dims(P_cos, 0), 4)
         P_sin_state = mx.expand_dims(mx.expand_dims(P_sin, 0), 4)
@@ -102,7 +111,7 @@ class CausalContinuousFourierMixer1D(nn.Module):
         
         v3 = v1_token_mixed * v2
         
-        return self.norm(self.out_proj(v3)) + x
+        return self.norm(self.out_proj(v3)) + x, new_state
 
 class CausalSpectralBlock(nn.Module):
     def __init__(self, latent_dim, num_modes=128):
@@ -119,9 +128,9 @@ class CausalSpectralBlock(nn.Module):
             nn.Dropout(0.05)
         )
         
-    def __call__(self, x): 
-        z = self.mixer(x)
-        return z + self.ffn(z)
+    def __call__(self, x, state=None): 
+        z, new_state = self.mixer(x, state)
+        return z + self.ffn(z), new_state
 
 class ContinuousFourierLM(nn.Module):
     def __init__(self, vocab_size, latent_dim=768, num_layers=12, num_modes=128):
@@ -134,12 +143,15 @@ class ContinuousFourierLM(nn.Module):
         self.ln_f = nn.LayerNorm(latent_dim)
         self.lm_head = nn.Linear(latent_dim, vocab_size, bias=False)
         
-    def __call__(self, input_ids):
+    def __call__(self, input_ids, cache=None):
         z = self.embedding(input_ids)
-        for mixer in self.mixers: 
-            z = mixer(z)
+        new_cache = []
+        for i, mixer in enumerate(self.mixers):
+            state = None if cache is None else cache[i]
+            z, new_state = mixer(z, state)
+            new_cache.append(new_state)
         logits = self.lm_head(self.ln_f(z))
-        return logits
+        return logits, new_cache
 
 def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7):
     # MLX arrays instead of PyTorch Tensors
@@ -151,18 +163,33 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7):
     
     generated = []
     
-    for _ in range(max_new_tokens):
-        # We only evaluate the network
-        logits = model(x)
+    # PREFILL PHASE: Build state token by token!
+    cache = None
+    for i, t_id in enumerate(input_ids[:-1]):
+        x_step = mx.array([[t_id]])
+        _, cache = model(x_step, cache=cache)
+        # Periodically evaluate to prevent the compute graph from growing infinitely
+        if i % 100 == 0:
+            mx.eval(*[layer[0] for layer in cache], *[layer[1] for layer in cache])
+            
+    # Final token of prompt gives first generated token
+    x = mx.array([[input_ids[-1]]])
+    logits, cache = model(x, cache=cache)
+    next_token_logits = logits[:, -1, :] / temperature
+    next_token = mx.random.categorical(next_token_logits)
+    token_id = next_token.item()
+    generated.append(token_id)
+    
+    # GENERATION PHASE
+    x = mx.array([[token_id]])
+    for _ in range(max_new_tokens - 1):
+        logits, cache = model(x, cache=cache)
         next_token_logits = logits[:, -1, :] / temperature
         
-        # MLX native Categorical sampling
         next_token = mx.random.categorical(next_token_logits)
         token_id = next_token.item()
         generated.append(token_id)
-        
-        # Append to sequence dynamically
-        x = mx.concatenate([x, mx.array([[token_id]])], axis=1)
+        x = mx.array([[token_id]])
         
     final_string = tokenizer.decode(input_ids + generated)
     print(f"\n[Final Output]:\n{final_string}\n")
@@ -198,13 +225,32 @@ def run_context_scaling_test(model, tokenizer, max_new_tokens=50, temperature=0.
         
         generated = []
         print("[Prompt Last 10 words]" + tokenizer.decode(input_ids[-10:]), end=" ", flush=True)
-        for _ in range(max_new_tokens):
-            logits = model(x)
+        
+        # PREFILL PHASE: Build state token by token!
+        cache = None
+        for i, t_id in enumerate(input_ids[:-1]):
+            x_step = mx.array([[t_id]])
+            _, cache = model(x_step, cache=cache)
+            if i % 100 == 0:
+                mx.eval(*[layer[0] for layer in cache], *[layer[1] for layer in cache])
+                
+        # Final token of prompt gives first generated token
+        x = mx.array([[input_ids[-1]]])
+        logits, cache = model(x, cache=cache)
+        next_token_logits = logits[:, -1, :] / temperature
+        next_token = mx.random.categorical(next_token_logits)
+        token_id = next_token.item()
+        generated.append(token_id)
+        
+        # GENERATION PHASE
+        x = mx.array([[token_id]])
+        for _ in range(max_new_tokens - 1):
+            logits, cache = model(x, cache=cache)
             next_token_logits = logits[:, -1, :] / temperature
             next_token = mx.random.categorical(next_token_logits)
             token_id = next_token.item()
             generated.append(token_id)
-            x = mx.concatenate([x, mx.array([[token_id]])], axis=1)
+            x = mx.array([[token_id]])
             
         final_output = tokenizer.decode(generated)
         print(f"\n[Generated Continuation Output]: {final_output}")
