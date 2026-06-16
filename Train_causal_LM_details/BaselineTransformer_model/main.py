@@ -18,7 +18,7 @@ OUTPUT_PATH = "./CausalFourierLM_Checkpoints_BiggerDataset_GPU"
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 
 from datasets import load_dataset
-from transformers import AutoTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments
+from transformers import AutoTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments, TrainerCallback
 from transformers.modeling_outputs import CausalLMOutput
 
 class MultiHeadAttention(nn.Module):
@@ -233,6 +233,16 @@ def print_param_count(model):
 # MAIN RUNNER (H100 GPU OPTIMIZED)
 # =============================================================================
 
+class StopAtStepCallback(TrainerCallback):
+    def __init__(self, stop_step=39000):
+        self.stop_step = stop_step
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step >= self.stop_step:
+            print(f"\n[Callback] Target step {self.stop_step} reached! Stopping training for fair comparison.\n")
+            control.should_training_stop = True
+            control.should_save = True
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--load_weights", type=str, default=None)
@@ -317,7 +327,8 @@ def main():
         eval_dataset=val_ds, 
         data_collator=collator,
         compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        callbacks=[StopAtStepCallback(stop_step=39000)]
     )
     
     print("Starting massive scale causal training run with streaming dataset on GPU...")
