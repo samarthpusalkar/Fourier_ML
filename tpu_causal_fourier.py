@@ -195,6 +195,14 @@ class ContinuousFourierLM(nn.Module):
             
         return CausalLMOutput(loss=loss, logits=logits)
 
+    def state_dict(self, *args, **kwargs):
+        sd = super().state_dict(*args, **kwargs)
+        # Safetensors throws a fatal error if it detects shared memory (tied weights).
+        # We clone the lm_head weight in the state_dict so it saves safely to disk.
+        if "lm_head.weight" in sd:
+            sd["lm_head.weight"] = sd["lm_head.weight"].clone()
+        return sd
+
 # =============================================================================
 # DATA PIPELINE
 # =============================================================================
@@ -264,7 +272,11 @@ def _mp_fn(index, flags):
         if index == 0:
             print(f"Loading weights from {flags.load_weights} (fresh epoch / fine-tuning mode)...")
         # Load state dict map_location="cpu" to be safe with multi-processing/TPUs
-        state_dict = torch.load(flags.load_weights, map_location="cpu")
+        if flags.load_weights.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            state_dict = load_file(flags.load_weights, device="cpu")
+        else:
+            state_dict = torch.load(flags.load_weights, map_location="cpu", weights_only=False)
         model.load_state_dict(state_dict)
     
     # HuggingFace Trainer automatically handles moving the model to TPU/XLA devices

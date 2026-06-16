@@ -158,6 +158,14 @@ class StandardTransformerLM(nn.Module):
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             
         return CausalLMOutput(loss=loss, logits=logits)
+        
+    def state_dict(self, *args, **kwargs):
+        sd = super().state_dict(*args, **kwargs)
+        # Safetensors throws a fatal error if it detects shared memory (tied weights).
+        # We clone the lm_head weight in the state_dict so it saves safely to disk.
+        if "lm_head.weight" in sd:
+            sd["lm_head.weight"] = sd["lm_head.weight"].clone()
+        return sd
 
 # =============================================================================
 # DATA PIPELINE (STREAMING OPENWEBTEXT / FINEWEB-EDU)

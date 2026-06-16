@@ -188,6 +188,14 @@ class ContinuousFourierLM(nn.Module):
             
         return CausalLMOutput(loss=loss, logits=logits)
 
+    def state_dict(self, *args, **kwargs):
+        sd = super().state_dict(*args, **kwargs)
+        # Safetensors throws a fatal error if it detects shared memory (tied weights).
+        # We clone the lm_head weight in the state_dict so it saves safely to disk.
+        if "lm_head.weight" in sd:
+            sd["lm_head.weight"] = sd["lm_head.weight"].clone()
+        return sd
+
 # =============================================================================
 # DATA PIPELINE (STREAMING OPENWEBTEXT / FINEWEB-EDU)
 # =============================================================================
@@ -291,7 +299,11 @@ def _mp_fn(index, flags):
     if flags.load_weights and os.path.exists(flags.load_weights):
         if index == 0:
             print(f"Loading weights from {flags.load_weights} (Streaming continuation mode)...")
-        state_dict = torch.load(flags.load_weights, map_location="cpu")
+        if flags.load_weights.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            state_dict = load_file(flags.load_weights, device="cpu")
+        else:
+            state_dict = torch.load(flags.load_weights, map_location="cpu", weights_only=False)
         model.load_state_dict(state_dict)
     
     training_args = TrainingArguments(
