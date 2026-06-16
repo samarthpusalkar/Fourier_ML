@@ -307,7 +307,7 @@ def main():
         
         push_to_hub=True,
         hub_strategy="checkpoint",         
-        hub_private_repo=True,
+        hub_private_repo=False,
         hub_model_id="CodeIsAbstract/Streaming_Transformers_Baseline_Checkpoints",              
         
         eval_strategy="steps",
