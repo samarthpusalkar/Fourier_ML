@@ -226,6 +226,12 @@ def compute_metrics(eval_pred):
 # MAIN RUNNER (H100 GPU OPTIMIZED)
 # =============================================================================
 
+def print_param_count(model):
+    # Only count parameters that require gradients, and avoid double-counting tied weights
+    num_params = len(set(p.data_ptr() for p in model.parameters() if p.requires_grad))
+    actual_params = sum(p.numel() for p in set(p for p in model.parameters() if p.requires_grad))
+    print(f"Total Trainable Parameters: {actual_params / 1e6:.2f}M")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--load_weights", type=str, default=None)
@@ -249,6 +255,7 @@ def main():
     train_ds, val_ds, collator, tokenizer = get_datasets(seq_length=flags.seq_len)
     model = StandardTransformerLM(vocab_size=len(tokenizer), hidden_size=768, num_layers=12, num_attention_heads=12, max_position_embeddings=512)
     print("Initialized Standard Transformer Baseline (~110M Params)...")
+    print_param_count(model)
     
     if flags.load_weights and os.path.exists(flags.load_weights):
         print(f"Loading weights from {flags.load_weights} (Streaming continuation mode)...")
