@@ -71,11 +71,18 @@ class TransformerBlock(nn.Module):
         self.c_proj = nn.Linear(4 * embed_dim, embed_dim)
         self.c_proj.is_residual = True
         self.dropout = nn.Dropout(dropout)
-        self.mlp = nn.Sequential(self.c_fc, self.gelu, self.c_proj, self.dropout)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        
+        # Manual MLP forward to prevent duplicate module registration in state_dict
+        m = self.ln_2(x)
+        m = self.c_fc(m)
+        m = self.gelu(m)
+        m = self.c_proj(m)
+        m = self.dropout(m)
+        
+        x = x + m
         return x
 
 class StandardTransformerLM(nn.Module):
