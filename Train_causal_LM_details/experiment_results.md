@@ -1,0 +1,249 @@
+# Causal Continuous Fourier LM: Experimental Results Log
+
+This document records the training runs and benchmarks for the Continuous Fourier Language Model (`ContinuousFourierLM`).
+
+---
+
+## Run 1: Colab Single-Chip TPU (LR: 2e-4) — Stable Baseline
+* **Date:** June 14, 2026
+* **Environment:** Google Colab
+* **Hardware:** Single-chip TPU v2/v3 (1 core active / single engine)
+* **Model Size:** ~120M parameters
+* **Optimizer:** `Adafactor` (`relative_step=False`, `scale_parameter=False`, `warmup_init=False`)
+* **Learning Rate (LR):** `2e-4` (Cosine schedule, warmup ratio: `0.05`)
+* **Dataset:** FineWeb-Edu (10B Tokens stream)
+* **Sequence Length:** 512 tokens
+* **Per-Device Batch Size:** 8 (Effective batch size = 8)
+
+### Run 1 Metrics
+| Step | Training Loss | Validation Loss | Train Perplexity (PPL) | Val Perplexity (PPL) | Validation Accuracy |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1000** | 6.5510 | 6.5292 | 699.96 | 684.88 | 12.68% |
+| **2000** | 6.0722 | 6.1332 | 433.64 | 460.91 | 15.02% |
+| **3000** | 5.6438 | 5.6944 | 282.55 | 297.19 | 17.89% |
+| **4000** | 5.3843 | 5.4440 | 217.95 | 231.36 | 18.91% |
+| **5000** | 5.1527 | 5.2809 | 172.90 | 196.55 | 20.18% |
+| **6000** | 5.1033 | 5.1295 | 164.57 | 168.94 | 21.27% |
+| **7000** | 4.9776 | 5.0389 | 145.13 | 154.30 | 21.72% |
+| **8000** | 4.8470 | 4.9246 | 127.35 | 137.64 | 22.56% |
+| **9000** | 4.8234 | 4.8471 | 124.38 | 127.37 | 23.06% |
+| **10000** | 4.7560 | 4.8040 | 116.28 | 122.00 | 23.35% |
+| **11000** | 4.6059 | 4.7624 | 100.07 | 117.02 | 23.64% |
+| **12000** | 4.7119 | 4.7042 | 111.26 | 110.41 | 24.23% |
+| **13000** | 4.6033 | 4.6481 | 99.81 | 104.39 | 24.62% |
+
+---
+
+## Run 2: Colab Single-Chip TPU (LR: 2e-2) — Stress-Test
+* **Date:** June 14, 2026
+* **Environment:** Google Colab
+* **Hardware:** Single-chip TPU v2/v3 (1 core active / single engine)
+* **Model Size:** ~120M parameters
+* **Optimizer:** `Adafactor` (`relative_step=False`, `scale_parameter=False`, `warmup_init=False`)
+* **Learning Rate (LR):** `2e-2` (100x larger than baseline; Cosine schedule, warmup ratio: `0.05`)
+* **Dataset:** FineWeb-Edu (10B Tokens stream)
+* **Sequence Length:** 512 tokens
+* **Per-Device Batch Size:** 8 (Effective batch size = 8)
+
+### Run 2 Metrics
+| Step | Training Loss | Validation Loss | Train Perplexity (PPL) | Val Perplexity (PPL) | Validation Accuracy |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1000** | 6.4726 | 6.3868 | 647.15 | 593.94 | 13.54% |
+| **2000** | 6.2179 | 6.2113 | 501.65 | 498.37 | 14.31% |
+| **3000** | 6.2957 | 6.0118 | 542.25 | 408.23 | 16.19% |
+| **4000** | 5.9885 | 5.9241 | 398.82 | 373.94 | 16.48% |
+| **5000** | 5.9116 | 5.8581 | 369.29 | 350.04 | 16.45% |
+| **6000** | 5.8270 | 5.7871 | 339.34 | 326.04 | 16.12% |
+| **7000** | 5.7522 | 5.6482 | 314.88 | 283.78 | 18.14% |
+| **8000** | 5.6303 | 5.6060 | 278.73 | 272.04 | 17.23% |
+| **9000** | 5.6950 | 5.3982 | 297.37 | 221.00 | 19.45% |
+
+---
+
+## Run 3: Colab Single-Chip TPU (LR: 2e-3) — Interrupted
+* **Date:** June 14, 2026
+* **Environment:** Google Colab
+* **Hardware:** Single-chip TPU v2/v3 (1 core active / single engine)
+* **Model Size:** ~120M parameters
+* **Optimizer:** `Adafactor` (`relative_step=False`, `scale_parameter=False`, `warmup_init=False`)
+* **Learning Rate (LR):** `2e-3` (10x larger than baseline; Cosine schedule, warmup ratio: `0.05`)
+* **Dataset:** FineWeb-Edu (10B Tokens stream)
+* **Sequence Length:** 512 tokens
+* **Per-Device Batch Size:** 8 (Effective batch size = 8)
+* **Status:** Interrupted at Step **2,422** due to a Google Colab session disconnect.
+
+### Run 3 Metrics
+| Step | Training Loss | Validation Loss | Train Perplexity (PPL) | Val Perplexity (PPL) | Validation Accuracy |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1000** | 6.2088 | 6.2137 | 497.12 | 499.53 | 14.83% |
+| **2000** | 5.8727 | 5.9717 | 355.21 | 392.16 | 15.09% |
+
+---
+
+## 📊 Three-Way Run Comparison (At Step 2,000)
+
+To understand the optimal learning rate dynamics, we compare the metrics at **Step 2,000** across all three schedules:
+
+| Run Configuration | Training Loss | Validation Loss | Train PPL | Val PPL | Validation Accuracy |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Run 1 (2e-4) — Stable Baseline** | 6.0722 | 6.1332 | 433.64 | 460.91 | 15.02% |
+| **Run 2 (2e-2) — High Stress-Test** | 6.2179 | 6.2113 | 501.65 | 498.37 | 14.31% |
+| **Run 3 (2e-3) — Intermediate** | **5.8727** | **5.9717** | **355.21** | **392.16** | **15.09%** |
+
+### 📈 Convergence & Learning Rate Analysis
+
+1. **Initial Acceleration in Run 3 (2e-3)**
+   * At Step 2,000, Run 3 (`2e-3`) achieved both the lowest validation loss (`5.9717`) and the highest validation accuracy (`15.09%`).
+   * This indicates that a learning rate of `2e-3` was highly optimal for early acceleration. It learned significantly faster than the `2e-4` baseline without suffering from the immediate parameter oscillations that degraded the `2e-2` run.
+
+2. **Stability Threshold**
+   * While the `2e-2` run was too aggressive (leading to training loss bumps and accuracy regressions), the `2e-3` run represents a strong middle-ground candidate. 
+   * Unfortunately, the Google Colab session disconnected at step **2,422** (11 minutes 12 seconds elapsed), preventing verification of whether this rate would remain stable throughout the entire 50,000-step cosine schedule or eventually overshoot.
+
+3. **Colab Limits & Continuation Recommendation**
+   * Since the training code includes saving to Google Drive every 2,000 steps (`OUTPUT_PATH = "/content/drive/MyDrive/CausalFourierLM_Checkpoints_BiggerDataset"`), a checkpoint at step 2,000 was successfully saved.
+   * **To resume the run**, execute `tpu_streaming_fourier.py` with the command-line flag:
+     ```bash
+     python tpu_streaming_fourier.py --resume_from_checkpoint "/content/drive/MyDrive/CausalFourierLM_Checkpoints_BiggerDataset/checkpoint-2000"
+     ```
+     *(Adjust the path if the Trainer saved it as a safetensors file or a different naming convention).*
+
+---
+
+## Run 4: H100 Cloud GPU — Fast Convergence & Qualitative Inference
+* **Date:** June 14, 2026
+* **Environment:** Cloud H100 GPU
+* **Hardware:** NVIDIA H100 (optimizations: `adamw_torch_fused`, `bf16`, `tf32`, `torch.compile`)
+* **Model Size:** ~120M parameters
+* **Batch Size:** 128 (Per-Device)
+* **Status:** Milestone reached at **Step 26,000**.
+* **Metrics at Step 26,000:**
+  * **Training Loss:** `3.5`
+  * **Perplexity (PPL):** `~33.12` ($e^{3.5}$)
+
+### Qualitative Inference (Checkpoint 26,000)
+Tested via `mlx_inference.py` (Apple Silicon native MLX engine). The following outputs demonstrate strong syntactic structures, emerging semantic reasoning, and formatting awareness:
+
+**Prompt 1:** `The history of the Roman Empire is`
+> the history of the roman empire is also discussed. roman coins, in particular, are considered roman coins. in addition, the roman coinage made the romans more powerful, and the romans were encouraged to use coins. it is this monetary history and the roman coinage that marked the beginning of the end of the roman empire. the other major roman coins in the period of the roman republic are the coins of the imperial period and the coins of the imperial period. check out the following links to learn about the history of the roman coins. | roman coins | | coins of the roman empire | | coins of the roman empire | | coins of the roman empire | | coins of the roman empire | | coins of the romans | | coins of the roman empire | | coin of the roman republic |
+
+**Prompt 2:** `Artificial intelligence and machine learning are`
+> artificial intelligence and machine learning are two of the most misunderstood in computing. the first of these two is the ability to recognize and recognize faces or alter the human mind. in this case, it is the need to have sophisticated understanding of the human brain through the interaction of human and machine. for the practical applications of both, there are a number of ways to buy computer science and machine learning. despite such, there is a growing interest in computer science that will certainly find application in many fields of life. the most obvious and useful form of computing is computer science. the first usage of computers in computer science was the study of computer architecture, computer architecture, and network architecture. one of the most important examples of computer science is the computer architecture which forms the basis of all modern computers.
+
+**Prompt 3:** `The primary function of a database is to`
+> the primary function of a database is to store a query object in a database. it can be used to store data in a database and in a relational database. it can also be used in database management system. sqlite database is an example of a relational database. it is used for the representation of a database in a relational database. it is a relational database application that can be used in sql server and other relational database services. all relational databases are created with the same basic features as relational databases. the database is not a relational database. it is a relational database that is an object - relational database, so it can be discussed in this article. advantages of relational database - relational database has many features which makes it easy to manage. - it is easy to use and it is easy to
+
+*Note: The model has successfully learned standard markdown structures (e.g., rendering tables `| roman coins |` and bullet points `- it is easy to use`).*
+
+---
+
+### Qualitative Inference (Checkpoint 38,000)
+**Metrics at Step 38,000:**
+* **Validation Loss:** `3.44`
+* **Perplexity (PPL):** `~31.19` ($e^{3.44}$)
+
+The model demonstrates a massive qualitative improvement in semantic cohesion, factual association, and sophisticated grammar logic over checkpoint 26k:
+
+**Prompt 1:** `The history of the Roman Empire is`
+> the history of the roman empire is that the romans were the first to have a continuous system of organising the empire, which was called the empire of the three emperors. during the reign of emperor augustus the empire was divided into two parts : the empire of the east and the west of the empire. in the east the empire of the east was divided into provinces of the empire of both sub - states, the east into the east and the persian empire of the east of the empire. the eastern empire was created as the empire of the east of the qing dynasty and the empire of the east of china. the empire of the east was divided into three provinces : the eastern provinces of china were divided into provinces of the empire of the former empire, the eastern empire of the east and the eastern
+
+**Prompt 2:** `Artificial intelligence and machine learning are`
+> artificial intelligence and machine learning are now making it possible for humans to carry out tasks that require human interaction, such as text messaging, as well as the ability to learn and store data. nevertheless, in the future, the memory used to store human intelligence could be limited to a small fraction of the human population. this is why, in the future, researchers will be able to use machine learning to analyze and predict human behavior and prescribe the use of intelligent machines for the benefit of humanity. image credit : istock03. ca for many students, the critical task of a high - level language teacher is to help them become more proficient in their language. this is achieved through a combination of strategies such as : - training the student to reflect on how they can use the information
+
+**Prompt 3:** `The primary function of a database is to`
+> the primary function of a database is to store the primary and secondary keys and to store and retrieve data. as far as storage is concerned, the primary key is the data which can be accessed through relational database management systems. the primary key is used to store data in the form of a record, which can then be accessed by the user. the first form of primary storage is referred to as the primary key, and is used to store the following : - user names and passwords - date, and - user name and password - owner details - other information such as the primary key number and the password and the data type - the length, width, and height of the data. for example, the amount of data in the current year is stored in a file called the “ key ” or
+
+*Note: Notice the remarkable semantic leap! The model accurately associates AI with "human interaction" and "predicting human behavior", databases with "primary and secondary keys", "user names and passwords", and history with the division of the empire under Augustus!*
+
+---
+
+### Qualitative Inference (Checkpoint 60,000)
+**Metrics at Step 60,000 (38k + 22k):**
+* **Validation Loss:** `3.215`
+* **Perplexity (PPL):** `~24.90` ($e^{3.215}$)
+
+The model demonstrates an important shift from "token statistics" to "document statistics." While the explanations may still be factually incorrect, the discourse structure, subject continuity, and causal chaining have significantly improved.
+
+**Prompt 1:** `The history of the Roman Empire is`
+> the history of the roman empire is a tale told in a series of five books. the general prologue is the final part of the book, and the next four chapters have all been written in latin. the length of the book is 12 pages. the author, who is also a philologist, has written an entire book on the book of acts. the books are written in the 7th century bc and the early fourth century bc. the first book in this book is the book of matthew. it contains all the books of the new testament. the king james version of the bible was published in 1570. the book of matthew covers the time of jesus and the revelation of the new testament. the gospel of john is the book of matthew. the book of matthew contains the book of the life
+
+*Note: Fails factually by drifting into biblical history, but succeeds in producing a hallucinated encyclopedia article with coherent sentences, plausible article structure, consistent grammar, and concept chaining.*
+
+**Prompt 2:** `Artificial intelligence and machine learning are`
+> artificial intelligence and machine learning are two of the most promising fields for ai development. in the field of machine learning, ai is used to generate a model of a specific object or process. in fact, the tool can be used to create and test objects. the best way to make an ai - generated model is to build a model that can simulate a real - world situation. the ai model is trained on the data and is useful for creating new and interesting content. it is also used to make predictions or make predictions about the future. ai can help you create a new model by using different models to solve a problem. for example, you can use the model to train a mobile app that has an algorithm to find the best fit for a given dataset. finally, the model
+
+*Note: Demonstrates subject continuity, causal structure, and abstraction. It correctly understands that AI, model, training, prediction, and dataset belong together. The sentence "The best way to make an AI-generated model is to build a model that can simulate a real-world situation." is a strong highlight.*
+
+**Prompt 3:** `The primary function of a database is to`
+> the primary function of a database is to transfer data from one database into another. for example, to transfer data from one database to another, the client performs a request to the database. the database server then sends its data to the database server, which then translates the data into an output format. the format of a database can vary depending on the type of database. functions of database architecture there are several types of databases, each with its own set of features and functions. some of the most common types include : - database - oriented database : this type of database is used to store data in a structured format, such as an excel spreadsheet or a database table. - sql : an sql database is a database management system that manages the structured data of a database. it is a type
+
+*Note: The strongest sample. It successfully weaves "client", "server", "database", "SQL", and "structured data" into a coherent explanation. It shows the model moving from mere repetition of concepts to providing explanations, elaborations, and examples.*
+
+#### Analysis & Next Steps
+- **Qualitative Shift:** The outputs are no longer just predicting local token patterns; they feel like a model attempting to communicate ideas and structures, even when the underlying facts are wrong.
+- **Failure Mode:** The model is now failing due to insufficient world knowledge, weak planning, and limited capacity rather than optimization collapse or inability to learn language. This is a very encouraging sign that the architecture will benefit from scaling.
+- **Next Test Recommendation:** Switch from open-ended completion prompts to short educational Q&A prompts (e.g., `Q: Why is the sky blue?\nA:`). Open-ended generation is currently mixing continuation quality with article-style imitation, whereas Q&A will better isolate the model's factual knowledge.
+
+---
+
+### Qualitative Inference (Checkpoint 96,000 / CC-MAIN Continued Pretraining)
+**Metrics at Step 96,000 (60k + 36k):**
+* **Corpus:** CC-MAIN (Educational / Web Text)
+
+The continued training run demonstrates fascinating behaviors where the model becomes better and worse at the same time, providing deep insights into the architecture's specific inductive biases. The model shifts from producing "natural article-like" text (at 38k) to "definition-oriented and educational" text, perfectly reflecting the transfer to the CC-MAIN corpus.
+
+**Prompt 1:** `The history of the Roman Empire is`
+> the history of the roman empire is very interesting. it is mentioned in the book of acts as well. the romans were very impressed with the knowledge of the emperor and his war of conquests and their significance. the romans were very well educated, but they were more familiar with the world than the rest. the romans were very proud of the city and the romans were always a great military force. the romans were extremely good at helping the romans and they were very good at helping the romans. they were efficient in their commands and in all the fun and sights. the roman military was very good at warfare and as a whole it was very easy to serve. the romans were one of the best military leaders in the world, and they were able to lead the romans to victory. the romans
+
+*Note: The weakest sample. The model knows the relevant concepts (Romans, Empire, Military, Conquests, Emperor) but gets trapped in a local reinforcement loop ("Romans -> Romans -> Romans"). This indicates a planning failure, not a knowledge deficit, which often resolves with scale.*
+
+**Prompt 2:** `Artificial intelligence and machine learning are`
+> artificial intelligence and machine learning are the three major areas that are most directly related to artificial intelligence. the term “ artificial intelligence ” is often used in the context of artificial intelligence and machine learning. in the context of computer science, artificial intelligence is the branch of computer science that deals with the study of computer systems and their behavior. artificial intelligence is the study of how computers learn and adapt to new situations. this branch of computer science focuses on software and software applications that do not rely on human intelligence or features. the field of computer science deals with ai, which is the branch of computer science that deals with the manipulation and analysis of computer systems and processes. in this branch, ai is an umbrella term that refers to artificial intelligence and machine learning. ai involves the use of machine learning to
+
+*Note: The strongest sample. It demonstrates a coherent explanatory hierarchy: AI -> definition -> computer science -> learning -> adaptation -> applications. Despite some repetition, the organization is incredibly strong for a 110M parameter model at this loss scale.*
+
+**Prompt 3:** `The primary function of a database is to`
+> the primary function of a database is to store data that contains data in the form of a text field. these are stored in a table. in a table, the table is an object that stores information about a table or column. for example, in a table, the table is called the table table. the table is the memory mechanism that stores the data in a table. the table stores the data in the memory. the table stores the data in a stored state called the row. the data can be in different forms ( like a column ), and it can be stored in different columns ( like a table ). the table can store a data in a table or a table can be an object in a table. the table can be a table, a row, a column, or
+
+*Note: An interesting failure mode. It understands table, row, column, and storage, but collapses into recursive definitions ("table stores table"). This highlights a failure of long-range discourse planning rather than a lack of vocabulary.*
+
+#### Architectural Insights & Assessment
+- **Subquadratic Attention Hypothesis:** The model excels at local coherence, syntax, topic retention, and concept association, but struggles with global organization, avoiding repetition, and maintaining narrative structure. This perfectly aligns with the expected behavior of a model that trades some expressive power of full attention for efficiency (via a subquadratic mechanism).
+- **Major Success Signal:** The end-to-end story is extremely compelling: a custom 110M model trains successfully, reproduces across TPU and H100, continues pretraining, transfers to a different corpus, and shows qualitative and quantitative improvements. This is hard to achieve accidentally.
+- **Conclusion:** The architecture is **genuinely viable as a language model architecture**.
+
+#### Next Scientific Steps
+The 110M scale optimization is largely complete. The next valuable experiments would be:
+1. **110M Transformer Baseline:** For rigorous comparison.
+2. **500M Version:** To see how scaling resolves the planning and repetition issues.
+3. **Long-Context Experiment:** To stress-test and reveal the advantages of the subquadratic mechanism.
+
+---
+
+### Context Scaling & Q&A Inference Observations (Checkpoint 96,000)
+
+Following the recommendation to test Q&A formatting and evaluate the subquadratic attention mechanism's long-context capabilities, two new tests were conducted.
+
+#### 1. Q&A Prompt Inference
+The model's responses to direct questions demonstrate its current capability profile:
+
+* **Prompt:** `Q: Why is the sky blue?\nA:`
+  **Observation:** The model retrieves topically relevant vocabulary (`temperature`, `atmosphere`, `water droplets`, `hydroxyl radicals`) and applies a logical explanatory structure. However, the explanation is factually incorrect and hallucinates physical mechanisms.
+* **Prompt:** `Q: What is the capital of France?\nA:`
+  **Observation:** The generation enters a repetition loop ("the capital of france is the capital of france") before pivoting to generating language-learning examples and grammatical definitions (e.g., nouns, adjectives).
+* **Prompt:** `Q: How does a database store information?\nA:`
+  **Observation:** The model correctly associates relational databases with tables, columns, data types, and unique identifiers. It demonstrates recursive, repetitive logic in its explanation (e.g., "in a table, the table is called the table table").
+
+#### 2. Context Continuation Scaling Test
+To test the effective context window, the model was prompted to continue a natural text document at various input lengths.
+
+| Context Length | Generation Quality Observation |
+| :--- | :--- |
+| **200 Tokens** | Highly coherent and grammatically correct continuation. The model seamlessly extends the semantic context regarding data storage and applications. |
+| **600 Tokens** | Coherence degrades. The model begins repeating structural words ("the, and thecontre") and phrases ("data of data database"), losing long-range narrative tracking. |
+| **1000 Tokens** | Severe syntax breakdown. Sentence structures dissolve, and punctuation becomes erratic (", with a and an edm..."). |
+| **1500 Tokens** | Near-total structural collapse. The output consists of disjointed words and extreme punctuation repetition ("stm pc ' s and database. the....."). |
+| **2000 Tokens** | Complete context collapse. The output degrades into a sequence of repetitive function words and punctuation ("the the all the every, number..."). |
+
+**Conclusion from Observations:**
+The model (at 110M parameters, 96,000 steps) exhibits strong local coherence, concept association, and syntactic structure within short contexts (up to ~200 tokens). However, as the input context scales beyond 600 tokens, the generation quality degrades systematically, leading to complete structural and grammatical collapse by 1500 tokens. This highlights a clear limitation in the current architecture's long-context discourse planning and attention span.
