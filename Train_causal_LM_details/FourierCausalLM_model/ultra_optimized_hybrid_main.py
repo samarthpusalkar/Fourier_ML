@@ -1,3 +1,4 @@
+%%writefile train_hybrid.py
 import os
 import math
 import argparse
@@ -19,11 +20,13 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments
 from transformers.modeling_outputs import CausalLMOutput
 from huggingface_hub import snapshot_download
+from analytical_decorator import analytical_solver
 
 # =============================================================================
 # ULTRA-OPTIMIZED HYBRID CONTINUOUS FOURIER ARCHITECTURE
 # =============================================================================
 
+@analytical_solver(lr=0.1, lr_decay=0.5, lam=1e-3, momentum=0.5)
 class LinearFourierMixer(nn.Module):
     def __init__(self, channels, num_modes=128, num_heads=12):
         super().__init__()
@@ -108,7 +111,7 @@ class LinearFourierMixer(nn.Module):
         # CRITICAL FIX: Remove post-norm, output raw projection for residual addition
         return self.out_proj(v3) + x
 
-
+@analytical_solver(lr=0.1, lr_decay=0.5, lam=1e-3, momentum=0.5)
 class SoftmaxFourierMixer(nn.Module):
     def __init__(self, channels, num_modes=128, num_heads=12):
         super().__init__()
@@ -184,6 +187,7 @@ class SoftmaxFourierMixer(nn.Module):
         # CRITICAL FIX: Remove post-norm
         return self.out_proj(v3) + x
 
+@analytical_solver(lr=0.1, lr_decay=0.5, lam=1e-3, momentum=0.5)
 class HybridSpectralBlock(nn.Module):
     def __init__(self, latent_dim, num_modes=128, is_softmax=False):
         super().__init__()
@@ -204,6 +208,7 @@ class HybridSpectralBlock(nn.Module):
         z = self.mixer(x)
         return z + self.ffn(z)
 
+@analytical_solver(lr=0.1, lr_decay=0.5, lam=1e-3, momentum=0.5)
 class HybridFourierLM(nn.Module):
     def __init__(self, vocab_size, latent_dim=768, num_layers=12, num_modes=128):
         super().__init__()
@@ -258,6 +263,7 @@ class HybridFourierLM(nn.Module):
 # DATA PIPELINE & TRAINING LOOP
 # =============================================================================
 
+@analytical_solver(lr=0.1, lr_decay=0.5, lam=1e-3, momentum=0.5)
 def get_datasets(seq_length=512):
     print("Streaming FineWeb-Edu 10BT dataset from HuggingFace...")
     ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-100BT", split="train", streaming=True)
@@ -399,7 +405,7 @@ def main():
         warmup_ratio=0.05,
         eval_accumulation_steps=10,
         logging_steps=100, 
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=1000,
         
         save_strategy="steps",
@@ -413,6 +419,7 @@ def main():
         
         report_to="none",
         dataloader_num_workers=2 if torch.cuda.is_available() else 0,
+        ddp_find_unused_parameters=False,
     )
     
     trainer = Trainer(
