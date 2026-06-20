@@ -45,7 +45,7 @@ def compute_analytical_delta(x_in, error, lam=1e-3, max_norm=1.0, max_samples=No
         
         # We know max_samples <= min(N, D), so we use the Woodbury (N < D) form
         # M will be [K, max_samples, max_samples]
-        I_batch = torch.eye(max_samples, device=device).unsqueeze(0)
+        I_batch = torch.eye(max_samples, device=device, dtype=x_in.dtype).unsqueeze(0)
         M_raw = x_c @ x_c.transpose(1, 2)
         
         # Scale-Invariant Regularization: scales lam by the variance of the input
@@ -79,7 +79,7 @@ def compute_analytical_delta(x_in, error, lam=1e-3, max_norm=1.0, max_samples=No
     # Since A @ A^T + lam * I is symmetric positive definite (SPD), Cholesky is 
     # exactly 2x faster (1/3 N^3 vs 2/3 N^3) and numerically superior.
     if N < D:
-        I_N = torch.eye(N, device=device)
+        I_N = torch.eye(N, device=device, dtype=x_in.dtype)
         M_raw = x_in @ x_in.T
         scale = M_raw.diagonal().mean().clamp(min=1.0)
         M = M_raw + (lam * scale) * I_N
@@ -87,7 +87,7 @@ def compute_analytical_delta(x_in, error, lam=1e-3, max_norm=1.0, max_samples=No
         L = torch.linalg.cholesky(M)
         dW_T = x_in.T @ torch.cholesky_solve(error, L)
     else:
-        I_D = torch.eye(D, device=device)
+        I_D = torch.eye(D, device=device, dtype=x_in.dtype)
         M_raw = x_in.T @ x_in
         scale = M_raw.diagonal().mean().clamp(min=1.0)
         M = M_raw + (lam * scale) * I_D
@@ -158,7 +158,7 @@ def _register_analytical_hooks(model):
                 # Standard Autograd gives dL/dOutput. Target propagation expects Target - Output.
                 # If Loss = 1/2*(Output - Target)^2, dL/dOutput = Output - Target.
                 # So Error = -dL/dOutput
-                error = -grad_output[0].detach()
+                error = -grad_output[0].detach().to(x_actual.dtype)
                 
                 # Apply depth-based learning rate decay (earlier layers get smaller LR to prevent drift)
                 current_lr = model._analytical_lr * (model._analytical_lr_decay ** model._analytical_state['backward_count'])
