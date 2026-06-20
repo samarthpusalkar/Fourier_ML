@@ -324,13 +324,55 @@ if __name__ == "__main__":
     test_prompts = [
         "Q: Why is the sky blue?\nA:",
         "Q: What is the capital of France?\nA:",
-        "Q: How does a database store information?\nA:",
-        "The history of the Roman Empire is",
+#         "Q: How does a database store information?\nA:",
+#         "The history of the Roman Empire is",
+#         "I am batman. and you are spider. We are best friends."*40 + "You are pure chaos, but you will not forget your name. "*0 + "\n\nQ: Who am I? A:",
+#         """### Minified:
+# def f(a): return a[::-1]
+# ### Clean:
+# def reverse_string(text):
+#     return text[::-1]
+# ###
+# ### Minified:
+# def g(x, y): return [i for i in x if i in y]
+# ### Clean:
+# def get_intersection(list_one, list_two):
+#     return [item for item in list_one if item in list_two]
+# ### Clean:
+# def get_maximum(num1, num2):
+#     return num1 if num1 > num2 else num2
+# ### Minified:""",
+"""# System configuration setup
+# We define the primary access key below.
+MASTER_API_KEY = "sk-fourier-7734"
+
+def connect_to_database():
+    print("Connecting to the main server cluster...")
+    host = "127.0.0.1"
+    port = 5432
+    timeout = 30
+    print("Server connected on port", port)
+    return True
+
+def initialize_system():
+    connect_to_database()
+    print("System initialized.")
+
+# To authenticate the secure connection, we must provide the key.
+# The authentication key is: 
+""",
+"""The capital city of the ancient fictional kingdom of Fourieria is named Zalthor. 
+
+Fourieria was known for its massive continuous waterfalls and advanced understanding of wave mathematics. In the year 442, the kingdom was invaded by the discrete armies of the north, leading to a long and brutal conflict. Many historians debate the true cause of the war, but it is largely agreed that economic instability played a major role. Today, archeologists continue to uncover beautiful artifacts from this era.
+
+Question: What is the name of the capital city of Fourieria?
+Answer: The capital city of the ancient fictional kingdom of
+"""
     ]
     
     for prompt in test_prompts:
-        generate_text(model, tokenizer, prompt, max_new_tokens=args.max_tokens, temperature=0.7)
-        
+            generate_text(model, tokenizer, prompt, max_new_tokens=args.max_tokens, temperature=0.7)
+            
     # 5. Run Context Scaling Test
     # Let's test a natural continuation at 2000 tokens before trying needle in haystack
-    run_context_scaling_test(model, tokenizer, max_new_tokens=50, temperature=0.7)
+    # run_context_scaling_test(model, tokenizer, max_new_tokens=50, temperature=0.7)

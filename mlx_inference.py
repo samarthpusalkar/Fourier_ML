@@ -38,8 +38,16 @@ class CausalContinuousFourierMixer1D(nn.Module):
         # MLX natively supports nn.silu directly
         v2 = nn.silu(self.proj_v2(x))
         
+        # # Create continuous time grid
+        # t = mx.arange(seq_len, dtype=x.dtype) / 511.0
+
         # Create continuous time grid
-        t = mx.arange(seq_len, dtype=x.dtype) / 511.0
+        # Secret trick: Interpolation! If sequence is longer than 512, squeeze it into [0, 1].
+        # If it is 512 or shorter, keep the original 511.0 scaling from training.
+        # dynamic_scale_quotient = (max(511.0, float(seq_len - 1))/511.0)+1
+        # dynamic_scale = (round(dynamic_scale_quotient-0.1)+1)*511.0
+        t = mx.arange(seq_len, dtype=x.dtype) / 511.
+
         t = mx.expand_dims(t, 1) # (seq_len, 1)
         
         omega_t = 2 * math.pi * t * mx.expand_dims(self.frequencies, 0) # (seq_len, num_modes)
@@ -155,6 +163,49 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7):
     print(f"\n[Final Output]:\n{final_string}\n")
     return final_string
 
+def run_context_scaling_test(model, tokenizer, max_new_tokens=50, temperature=0.7):
+    print("\n" + "="*80)
+    print("🚀 RUNNING CONTEXT CONTINUATION SCALING TEST")
+    print("="*80)
+    
+    # We will use the contents of database_wiki.txt as our long natural text prompt
+    try:
+        with open("database_wiki.txt", "r", encoding="utf-8") as f:
+            full_text = f.read()
+    except FileNotFoundError:
+        full_text = "The history of machine learning is fascinating. " * 50
+        
+    # Encode the full text once
+    full_input_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    # The user wants to start from 600 and scale up to see where it breaks
+    test_lengths = [200, 600, 1000, 1500, 2000]
+    
+    for target_length in test_lengths:
+        print(f"\n--- Testing Context Length: {target_length} Tokens ---")
+        
+        if len(full_input_ids) < target_length:
+            print(f"Warning: Not enough text for {target_length} tokens. only contains {len(full_input_ids)} actual tokens Skipping.")
+            continue
+            
+        input_ids = full_input_ids[:target_length]
+        
+        x = mx.array([input_ids])
+        
+        generated = []
+        print("[Prompt Last 10 words]" + tokenizer.decode(input_ids[-10:]), end=" ", flush=True)
+        for _ in range(max_new_tokens):
+            logits = model(x)
+            next_token_logits = logits[:, -1, :] / temperature
+            next_token = mx.random.categorical(next_token_logits)
+            token_id = next_token.item()
+            generated.append(token_id)
+            x = mx.concatenate([x, mx.array([[token_id]])], axis=1)
+            
+        final_output = tokenizer.decode(generated)
+        print(f"\n[Generated Continuation Output]: {final_output}")
+        
+    print("\n" + "="*80 + "\n")
+
 # =============================================================================
 # HUGGING FACE HUB FETCH & INFERENCE RUNNER
 # =============================================================================
@@ -162,7 +213,7 @@ def generate_text(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Replace the repo_id with yours once training is pushed!
-    parser.add_argument("--repo_id", type=str, default="your-username/my-crash-backups",
+    parser.add_argument("--repo_id", type=str, default="CodeIsAbstract/Streaming_Fourier_LM_Checkpoints",
                         help="Hugging Face repo ID to fetch the model from.")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Optional: Path to a local safetensors file. If set, overrides repo_id.")
@@ -218,12 +269,20 @@ if __name__ == "__main__":
     # We explicitly force evaluation to flush the initialization
     mx.eval(model.parameters())
     
-    # 4. Run Qualitative Inference
+    # 4. Run Qualitative Inference (Q&A Style)
     test_prompts = [
+        "Q: Why is the sky blue?\nA:",
+        "Q: What is the capital of France?\nA:",
+        "Q: How does a database store information?\nA:",
         "The history of the Roman Empire is",
         "Artificial intelligence and machine learning are",
         "The primary function of a database is to"
     ]
     
+    
     for prompt in test_prompts:
         generate_text(model, tokenizer, prompt, max_new_tokens=args.max_tokens, temperature=0.7)
+        
+    # 5. Run Context Scaling Test
+    # # Let's test a natural continuation at 2000 tokens before trying needle in haystack
+    # run_context_scaling_test(model, tokenizer, max_new_tokens=50, temperature=0.7)
